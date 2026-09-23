@@ -1,21 +1,30 @@
-"""User management — sub_admin (and admin) create/delete users, maintain teacher info."""
-from fastapi import APIRouter, Depends, HTTPException, status
+"""Staff user management (admin / principal / sub_admin / teacher accounts).
+
+Students are managed via /students (section pages).
+"""
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.database import db_cursor
 from app.deps import require_roles
-from app.schemas import TeacherInfoUpdate, UserCreate
+from app.permissions import MANAGERS, STAFF, ensure_can_edit_students
+from app.schemas import StaffCreate, TeacherInfoUpdate
 from app.security import hash_password
+from app.uploads import IMAGE_TYPES, delete_file, save_upload
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-manager = require_roles("admin", "sub_admin")
+manager = require_roles(*MANAGERS)
+staff = require_roles(*STAFF)
 
 
 @router.post("", status_code=201)
-def create_user(body: UserCreate, actor: dict = Depends(manager)):
-    # sub_admin cannot create admins
-    if body.user_type == "admin" and actor["user_type"] != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only admin can create admins")
+def create_staff(body: StaffCreate, actor: dict = Depends(manager)):
+    # only admin can create admin/principal/sub_admin accounts
+    if body.user_type in ("admin", "principal", "sub_admin") and actor["user_type"] != "admin":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only admin can create admin/principal/sub-admin accounts",
+        )
     with db_cursor() as cur:
         cur.execute("SELECT id FROM users WHERE username = %s", (body.username,))
         if cur.fetchone():
@@ -40,29 +49,23 @@ def create_user(body: UserCreate, actor: dict = Depends(manager)):
                 "VALUES (%s, %s, %s, %s, %s)",
                 (user_id, info.subject, info.qualification, info.joining_date, info.address),
             )
-        elif body.user_type == "student" and body.student_info:
-            s = body.student_info
-            cur.execute(
-                "INSERT INTO student_profiles "
-                "(user_id, class_id, section_id, roll_no, guardian_name, guardian_phone) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (user_id, s.class_id, s.section_id, s.roll_no, s.guardian_name, s.guardian_phone),
-            )
     return {"id": user_id, "username": body.username, "user_type": body.user_type}
 
 
 @router.get("")
 def list_users(user_type: str | None = None, actor: dict = Depends(manager)):
     sql = (
-        "SELECT id, username, full_name, email, phone, user_type, is_active, created_at "
+        "SELECT id, username, full_name, email, phone, photo_path, user_type, is_active, created_at "
         "FROM users"
     )
     params: tuple = ()
     if user_type:
         sql += " WHERE user_type = %s"
         params = (user_type,)
+    else:
+        sql += " WHERE user_type != 'student'"
     with db_cursor() as cur:
-        cur.execute(sql + " ORDER BY id", params)
+        cur.execute(sql + " ORDER BY user_type, full_name", params)
         return cur.fetchall()
 
 
@@ -75,39 +78,49 @@ def delete_user(user_id: int, actor: dict = Depends(manager)):
         target = cur.fetchone()
         if not target:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-        if target["user_type"] == "admin" and actor["user_type"] != "admin":
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only admin can delete admins")
+        if target["user_type"] in ("admin", "principal") and actor["user_type"] != "admin":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only admin can delete this account")
         cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
     return {"deleted": user_id}
 
 
-# ---------- students (teachers need this list for report cards) ----------
+# ---------- profile photo (staff: managers; students: managers/class teacher) ----------
 
-@router.get("/students")
-def list_students(
-    actor: dict = Depends(require_roles("admin", "sub_admin", "teacher"))
+@router.post("/{user_id}/photo")
+def upload_photo(
+    user_id: int,
+    file: UploadFile = File(...),
+    actor: dict = Depends(staff),
 ):
     with db_cursor() as cur:
-        cur.execute(
-            "SELECT u.id, u.username, u.full_name, sp.roll_no, "
-            "sp.class_id, c.name AS class_name, sp.section_id, s.name AS section_name "
-            "FROM users u "
-            "LEFT JOIN student_profiles sp ON sp.user_id = u.id "
-            "LEFT JOIN classes c ON c.id = sp.class_id "
-            "LEFT JOIN sections s ON s.id = sp.section_id "
-            "WHERE u.user_type = 'student' AND u.is_active = 1 ORDER BY u.full_name"
-        )
-        return cur.fetchall()
+        cur.execute("SELECT id, user_type, photo_path FROM users WHERE id = %s", (user_id,))
+        target = cur.fetchone()
+        if not target:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+        if target["user_type"] == "student":
+            cur.execute(
+                "SELECT class_id, section_id FROM student_profiles WHERE user_id = %s",
+                (user_id,),
+            )
+            sp = cur.fetchone() or {"class_id": None, "section_id": None}
+            ensure_can_edit_students(cur, actor, sp["class_id"], sp["section_id"])
+        elif actor["user_type"] not in MANAGERS:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not allowed")
+        path = save_upload(file, "photos", IMAGE_TYPES, max_mb=5)
+        delete_file(target["photo_path"])
+        cur.execute("UPDATE users SET photo_path = %s WHERE id = %s", (path, user_id))
+    return {"photo_path": path}
 
 
 # ---------- teacher info ----------
 
 @router.get("/teachers")
-def list_teachers(actor: dict = Depends(require_roles("admin", "sub_admin"))):
+def list_teachers(actor: dict = Depends(manager)):
     with db_cursor() as cur:
         cur.execute(
-            "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.is_active, "
-            "t.subject, t.qualification, t.joining_date, t.address "
+            "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.photo_path, u.is_active, "
+            "t.subject, t.qualification, t.joining_date, t.address, "
+            "(SELECT COUNT(*) FROM lesson_plans lp WHERE lp.teacher_id = u.id) AS lesson_plan_count "
             "FROM users u LEFT JOIN teacher_profiles t ON t.user_id = u.id "
             "WHERE u.user_type = 'teacher' ORDER BY u.full_name"
         )

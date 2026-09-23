@@ -7,16 +7,22 @@ from app.config import DB_CONFIG
 
 
 def get_connection() -> pymysql.connections.Connection:
-    return pymysql.connect(
-        host=DB_CONFIG["host"],
-        port=DB_CONFIG["port"],
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"],
-        database=DB_CONFIG["database"],
-        cursorclass=DictCursor,
-        charset="utf8mb4",
-        autocommit=False,
-    )
+    connection_kwargs = {
+        "user": DB_CONFIG["user"],
+        "password": DB_CONFIG["password"],
+        "database": DB_CONFIG["database"],
+        "cursorclass": DictCursor,
+        "charset": "utf8mb4",
+        "autocommit": False,
+    }
+
+    if DB_CONFIG.get("unix_socket"):
+        connection_kwargs["unix_socket"] = DB_CONFIG["unix_socket"]
+    else:
+        connection_kwargs["host"] = DB_CONFIG.get("host", "localhost")
+        connection_kwargs["port"] = DB_CONFIG.get("port", 3306)
+
+    return pymysql.connect(**connection_kwargs)
 
 
 @contextmanager

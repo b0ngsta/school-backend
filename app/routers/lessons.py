@@ -1,4 +1,4 @@
-"""Lesson plans — teachers upload (with photos/PDFs); admin surveils everything."""
+"""Lesson plans — teachers upload for their assigned classes; admins see everything."""
 import os
 import secrets
 
@@ -7,15 +7,18 @@ from fastapi.responses import FileResponse
 
 from app.config import UPLOAD_DIR
 from app.database import db_cursor
-from app.deps import get_current_user, require_roles
+from app.deps import require_roles
+from app.permissions import MANAGERS, STAFF, is_assigned
 
 router = APIRouter(prefix="/lessons", tags=["lesson plans"])
+
+staff = require_roles(*STAFF)
 
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
 MAX_FILE_MB = 10
 
 
-def _save_upload(file: UploadFile, subdir: str) -> str:
+def _save_upload(file: UploadFile) -> str:
     if file.content_type not in ALLOWED_TYPES:
         raise HTTPException(
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -25,7 +28,7 @@ def _save_upload(file: UploadFile, subdir: str) -> str:
     if len(data) > MAX_FILE_MB * 1024 * 1024:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"Max {MAX_FILE_MB} MB")
     ext = os.path.splitext(file.filename or "")[1] or ".bin"
-    folder = os.path.join(UPLOAD_DIR, subdir)
+    folder = os.path.join(UPLOAD_DIR, "lessons")
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{secrets.token_hex(8)}{ext}")
     with open(path, "wb") as f:
@@ -36,28 +39,32 @@ def _save_upload(file: UploadFile, subdir: str) -> str:
 @router.post("", status_code=201)
 def create_lesson_plan(
     class_id: int = Form(...),
-    subject: str = Form(...),
-    title: str = Form(...),
+    heading: str = Form(...),
     section_id: int | None = Form(None),
-    description: str | None = Form(None),
-    lesson_date: str | None = Form(None),  # YYYY-MM-DD
+    duration_start: str | None = Form(None),  # YYYY-MM-DD
+    duration_end: str | None = Form(None),
+    final_remark: str | None = Form(None),
     files: list[UploadFile] = File(default=[]),
     teacher: dict = Depends(require_roles("teacher")),
 ):
     with db_cursor() as cur:
-        cur.execute("SELECT id FROM classes WHERE id = %s", (class_id,))
-        if not cur.fetchone():
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Class not found")
+        if not is_assigned(cur, teacher, class_id, section_id):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "You are not assigned to this class/section"
+            )
         cur.execute(
             "INSERT INTO lesson_plans "
-            "(teacher_id, class_id, section_id, subject, title, description, lesson_date) "
+            "(teacher_id, class_id, section_id, heading, duration_start, duration_end, final_remark) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (teacher["id"], class_id, section_id, subject, title, description, lesson_date),
+            (
+                teacher["id"], class_id, section_id, heading,
+                duration_start or None, duration_end or None, final_remark,
+            ),
         )
         plan_id = cur.lastrowid
         saved = []
         for f in files:
-            path = _save_upload(f, "lessons")
+            path = _save_upload(f)
             cur.execute(
                 "INSERT INTO lesson_files (lesson_plan_id, file_path, original_name, content_type) "
                 "VALUES (%s, %s, %s, %s)",
@@ -69,31 +76,21 @@ def create_lesson_plan(
 
 @router.get("")
 def list_lesson_plans(
-    class_id: int | None = None,
     teacher_id: int | None = None,
-    user: dict = Depends(get_current_user),
+    class_id: int | None = None,
+    user: dict = Depends(staff),
 ):
-    """Admin/sub_admin see all; teachers see their own; students see their class's."""
+    """Managers see all (filterable); teachers see their own."""
     where, params = [], []
     if user["user_type"] == "teacher":
         where.append("lp.teacher_id = %s")
         params.append(user["id"])
-    elif user["user_type"] == "student":
-        with db_cursor() as cur:
-            cur.execute(
-                "SELECT class_id FROM student_profiles WHERE user_id = %s", (user["id"],)
-            )
-            row = cur.fetchone()
-        if not row or row["class_id"] is None:
-            return []
-        where.append("lp.class_id = %s")
-        params.append(row["class_id"])
+    elif teacher_id is not None:
+        where.append("lp.teacher_id = %s")
+        params.append(teacher_id)
     if class_id is not None:
         where.append("lp.class_id = %s")
         params.append(class_id)
-    if teacher_id is not None and user["user_type"] in ("admin", "sub_admin"):
-        where.append("lp.teacher_id = %s")
-        params.append(teacher_id)
 
     sql = (
         "SELECT lp.*, u.full_name AS teacher_name, c.name AS class_name, s.name AS section_name "
@@ -116,9 +113,8 @@ def list_lesson_plans(
                 f"WHERE lesson_plan_id IN ({','.join(['%s'] * len(ids))})",
                 ids,
             )
-            files = cur.fetchall()
             by_plan: dict[int, list] = {}
-            for f in files:
+            for f in cur.fetchall():
                 by_plan.setdefault(f["lesson_plan_id"], []).append(f)
             for p in plans:
                 p["files"] = by_plan.get(p["id"], [])
@@ -126,7 +122,7 @@ def list_lesson_plans(
 
 
 @router.get("/files/{file_id}")
-def download_lesson_file(file_id: int, user: dict = Depends(get_current_user)):
+def download_lesson_file(file_id: int, user: dict = Depends(staff)):
     with db_cursor() as cur:
         cur.execute("SELECT * FROM lesson_files WHERE id = %s", (file_id,))
         f = cur.fetchone()
@@ -138,15 +134,17 @@ def download_lesson_file(file_id: int, user: dict = Depends(get_current_user)):
 
 
 @router.delete("/{plan_id}")
-def delete_lesson_plan(plan_id: int, user: dict = Depends(get_current_user)):
-    """Teacher can delete own plan; admin can delete any."""
+def delete_lesson_plan(plan_id: int, user: dict = Depends(staff)):
+    """Teacher: own plans. Admin/principal: any."""
     with db_cursor() as cur:
         cur.execute("SELECT teacher_id FROM lesson_plans WHERE id = %s", (plan_id,))
         plan = cur.fetchone()
         if not plan:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Lesson plan not found")
-        if user["user_type"] != "admin" and plan["teacher_id"] != user["id"]:
+        if user["user_type"] == "teacher" and plan["teacher_id"] != user["id"]:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your lesson plan")
+        if user["user_type"] == "sub_admin":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not allowed")
         cur.execute("SELECT file_path FROM lesson_files WHERE lesson_plan_id = %s", (plan_id,))
         paths = [r["file_path"] for r in cur.fetchall()]
         cur.execute("DELETE FROM lesson_plans WHERE id = %s", (plan_id,))

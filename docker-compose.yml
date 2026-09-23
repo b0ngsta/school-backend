@@ -1,0 +1,40 @@
+# School Management backend — API + MySQL.
+#   docker compose up -d --build
+# API on port 8000. schema.sql auto-loads on FIRST start (empty db volume).
+# Change MYSQL_ROOT_PASSWORD + SECRET_KEY before real use.
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: schoolroot
+      MYSQL_DATABASE: school_app
+    volumes:
+      - db_data:/var/lib/mysql
+      # seed schema on first boot only
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pschoolroot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: mysql+pymysql://root:schoolroot@db:3306/school_app
+      MYSQL_SOCKET_PATH: ""            # force TCP inside Docker
+      SECRET_KEY: change-me-in-production
+      TOKEN_EXPIRE_HOURS: "24"
+    volumes:
+      - uploads_data:/app/uploads      # persist photos / lesson files / papers
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:
+  uploads_data:

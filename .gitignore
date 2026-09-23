@@ -18,6 +18,7 @@ ENV/
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # Local database and runtime files
 *.sqlite
@@ -25,6 +26,7 @@ ENV/
 *.db
 *.log
 uploads/
+backups/
 
 # Build and packaging output
 build/

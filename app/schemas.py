@@ -3,7 +3,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-UserType = Literal["admin", "sub_admin", "teacher", "student"]
+UserType = Literal[
+    "admin", "principal", "sub_admin", "coordinator", "driver", "teacher", "student"
+]
+StaffType = Literal["admin", "principal", "sub_admin", "coordinator", "driver", "teacher"]
 
 
 # ---------- auth ----------
@@ -20,7 +23,7 @@ class LoginResponse(BaseModel):
     full_name: str
 
 
-# ---------- users ----------
+# ---------- staff users ----------
 class TeacherInfo(BaseModel):
     subject: str | None = None
     qualification: str | None = None
@@ -28,43 +31,92 @@ class TeacherInfo(BaseModel):
     address: str | None = None
 
 
-class StudentInfo(BaseModel):
-    class_id: int | None = None
-    section_id: int | None = None
-    roll_no: str | None = None
-    guardian_name: str | None = None
-    guardian_phone: str | None = None
-
-
-class UserCreate(BaseModel):
+class StaffCreate(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     password: str = Field(min_length=6)
     full_name: str
     email: str | None = None
     phone: str | None = None
-    user_type: UserType
-    teacher_info: TeacherInfo | None = None   # when user_type == teacher
-    student_info: StudentInfo | None = None   # when user_type == student
+    user_type: StaffType
+    teacher_info: TeacherInfo | None = None
 
 
 class TeacherInfoUpdate(TeacherInfo):
     pass
 
 
+# ---------- assignments ----------
+class AssignmentCreate(BaseModel):
+    teacher_id: int
+    class_id: int
+    section_id: int
+    role: Literal["class_teacher", "subject_teacher"]
+    subject: str | None = None  # for subject_teacher
+
+
 # ---------- classes ----------
 class ClassCreate(BaseModel):
     name: str = Field(min_length=1, max_length=50)
+    fee_amount: float | None = Field(default=None, ge=0)
+    subjects: list[str] = Field(default_factory=list)
+
+
+class SubjectsUpdate(BaseModel):
+    subjects: list[str] = Field(default_factory=list)
 
 
 class SectionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=10)
 
 
-# ---------- report cards ----------
+# ---------- students ----------
+class StudentBase(BaseModel):
+    full_name: str
+    email: str | None = None
+    phone: str | None = None
+    roll_no: str | None = None
+    admission_no: str | None = None
+    dob: date | None = None
+    father_name: str | None = None
+    mother_name: str | None = None
+    guardian_phone: str | None = None
+    address: str | None = None
+
+
+class StudentCreate(StudentBase):
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=6)
+    class_id: int
+    section_id: int
+
+
+class StudentUpdate(StudentBase):
+    class_id: int | None = None
+    section_id: int | None = None
+
+
+# ---------- student page records ----------
+class HomeworkCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    due_date: date | None = None
+    status: Literal["pending", "submitted", "late"] = "pending"
+    note: str | None = None
+
+
+class HomeworkUpdate(BaseModel):
+    title: str | None = None
+    due_date: date | None = None
+    status: Literal["pending", "submitted", "late"] | None = None
+    note: str | None = None
+
+
+class RemarkCreate(BaseModel):
+    remark: str = Field(min_length=1)
+
+
 class ReportCardCreate(BaseModel):
-    student_id: int
     term: str
-    grades: dict[str, Any] | None = None   # {"Math": 92, "Science": "A"}
+    grades: dict[str, Any] | None = None
     remarks: str | None = None
 
 

@@ -1,0 +1,46 @@
+# SITE_ADDRESS decides the mode:
+#   api.yourschool.com  -> automatic HTTPS via Let's Encrypt (needs DNS pointing here)
+#   :80                 -> plain HTTP on the server's IP, no certificate
+# Set it in .env.production. Plain HTTP sends login passwords in the clear --
+# use it only to get going, then switch to a real hostname.
+{
+	email {$TLS_EMAIL:ops@example.invalid}
+}
+
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	# uploads can be large (10 MB cap in the app) -- leave headroom
+	request_body {
+		max_size 20MB
+	}
+
+	# HSTS is ignored by browsers over plain HTTP, so it is safe to always send.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Swagger UI is public by default. Uncomment to lock it to your office IP:
+	# @docs path /docs* /redoc* /openapi.json
+	# handle @docs {
+	# 	@notallowed not remote_ip 203.0.113.4
+	# 	respond @notallowed 404
+	# 	reverse_proxy api:8000
+	# }
+
+	reverse_proxy api:8000 {
+		health_uri /health
+		health_interval 30s
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10MB
+			roll_keep 5
+		}
+	}
+}

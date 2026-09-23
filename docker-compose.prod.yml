@@ -1,0 +1,79 @@
+# Production stack: Caddy (TLS) -> FastAPI -> MySQL 8
+#
+#   cp .env.production.example .env.production && edit it
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Only Caddy publishes ports. The API and MySQL are reachable on the internal
+# network only -- do NOT add a `ports:` block to them.
+name: school-api
+
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --max_connections=200
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env.production}
+      # schema.sql hardcodes `school_app` -- do not rename this
+      MYSQL_DATABASE: school_app
+      MYSQL_USER: ${MYSQL_USER:-school}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env.production}
+    volumes:
+      - db_data:/var/lib/mysql
+      # runs ONLY on first boot, when db_data is empty
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging: &default_logging
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+
+  api:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "mysql+pymysql://${MYSQL_USER:-school}:${MYSQL_PASSWORD}@db:3306/school_app"
+      MYSQL_SOCKET_PATH: ""            # force TCP -- never use the unix socket here
+      SECRET_KEY: "${SECRET_KEY:?generate one with `openssl rand -hex 32`}"
+      TOKEN_EXPIRE_HOURS: ${TOKEN_EXPIRE_HOURS:-24}
+      UPLOAD_DIR: uploads
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+    volumes:
+      - uploads_data:/app/uploads      # photos, lesson files, exam papers
+    depends_on:
+      db:
+        condition: service_healthy
+    logging: *default_logging
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # hostname -> auto-HTTPS; ":80" -> plain HTTP on the server's IP
+      SITE_ADDRESS: "${SITE_ADDRESS:-:80}"
+      TLS_EMAIL: "${TLS_EMAIL:-ops@example.invalid}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data                # certificates -- keep this volume
+      - caddy_config:/config
+    depends_on:
+      - api
+    logging: *default_logging
+
+volumes:
+  db_data:
+  uploads_data:
+  caddy_data:
+  caddy_config:
