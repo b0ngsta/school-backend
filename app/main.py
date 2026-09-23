@@ -27,46 +27,48 @@ from app.routers import (
     users,
 )
 
-app = FastAPI(
+api = FastAPI(
     title="School Management API",
     description="Admin/principal see everything. Sub-admin does the hard work. "
     "Teachers manage their classes, lesson plans and student records.",
     version="2.0.0",
 )
 
-app.add_middleware(
-    CORSMiddleware,
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# profile photos are served statically (photo_path maps to /<UPLOAD_DIR>/photos/…)
+api.mount(f"/{UPLOAD_DIR}", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
+api.include_router(auth.router)
+api.include_router(dashboard.router)
+api.include_router(users.router)
+api.include_router(assignments.router)
+api.include_router(classes.router)
+api.include_router(students.router)
+api.include_router(student_portal.router)
+api.include_router(lessons.router)
+api.include_router(notices.router)
+api.include_router(reception.router)
+api.include_router(fees.router)
+api.include_router(payments.router)
+api.include_router(attendance.router)
+api.include_router(exams.router)
+api.include_router(transport.router)
+api.include_router(sms.router)
+api.include_router(timetable.router)
+api.include_router(hr.router)
+api.include_router(calendar.router)
+
+
+@api.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+# Wrap the entire ASGI app so even unhandled 500 responses include CORS headers.
+app = CORSMiddleware(
+    app=api,
     allow_origins=["*"],  # tighten in production
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-# profile photos are served statically (photo_path maps to /<UPLOAD_DIR>/photos/…)
-app.mount(f"/{UPLOAD_DIR}", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-
-app.include_router(auth.router)
-app.include_router(dashboard.router)
-app.include_router(users.router)
-app.include_router(assignments.router)
-app.include_router(classes.router)
-app.include_router(students.router)
-app.include_router(student_portal.router)
-app.include_router(lessons.router)
-app.include_router(notices.router)
-app.include_router(reception.router)
-app.include_router(fees.router)
-app.include_router(payments.router)
-app.include_router(attendance.router)
-app.include_router(exams.router)
-app.include_router(transport.router)
-app.include_router(sms.router)
-app.include_router(timetable.router)
-app.include_router(hr.router)
-app.include_router(calendar.router)
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
