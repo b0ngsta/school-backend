@@ -17,14 +17,11 @@ services:
       --max_connections=200
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env.production}
-      # schema.sql hardcodes `school_app` -- do not rename this
       MYSQL_DATABASE: school_app
       MYSQL_USER: ${MYSQL_USER:-school}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env.production}
     volumes:
       - db_data:/var/lib/mysql
-      # runs ONLY on first boot, when db_data is empty
-      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./backups:/backups
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
@@ -40,12 +37,48 @@ services:
     build: .
     restart: unless-stopped
     environment:
+      APP_ENV: production
       DATABASE_URL: "mysql+pymysql://${MYSQL_USER:-school}:${MYSQL_PASSWORD}@db:3306/school_app"
       MYSQL_SOCKET_PATH: ""            # force TCP -- never use the unix socket here
+      DB_SSL_CA: ""                    # db is on the private compose network
       SECRET_KEY: "${SECRET_KEY:?generate one with `openssl rand -hex 32`}"
-      TOKEN_EXPIRE_HOURS: ${TOKEN_EXPIRE_HOURS:-24}
+      CORS_ORIGINS: "${CORS_ORIGINS:-}"
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      REFRESH_TOKEN_IDLE_DAYS: ${REFRESH_TOKEN_IDLE_DAYS:-30}
+      ENFORCE_PASSWORD_CHANGE: ${ENFORCE_PASSWORD_CHANGE:-false}
+      ENABLE_DOCS: ${ENABLE_DOCS:-false}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Kolkata}
       UPLOAD_DIR: uploads
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+      # schema migrations run on every start (alembic upgrade head)
+      MIGRATE_ON_START: ${MIGRATE_ON_START:-true}
+      # uploads: "local" (the uploads_data volume) or "s3" (any S3-compatible bucket)
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      S3_REGION: ${S3_REGION:-}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      S3_PREFIX: ${S3_PREFIX:-}
+      # email: password-reset codes (without SMTP_HOST nothing is sent)
+      SCHOOL_NAME: "${SCHOOL_NAME:-School}"
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      EMAIL_FROM: "${EMAIL_FROM:-}"
+      REQUIRE_USER_EMAIL: ${REQUIRE_USER_EMAIL:-false}
+      RESET_CODE_TTL_MINUTES: ${RESET_CODE_TTL_MINUTES:-15}
+      RESET_MAX_REQUESTS_PER_IP: ${RESET_MAX_REQUESTS_PER_IP:-100}
+      # bulk user import (keep the Caddyfile's /imports/users body limit above CSV + ZIP)
+      IMPORT_MAX_ROWS: ${IMPORT_MAX_ROWS:-1000}
+      IMPORT_MAX_CSV_MB: ${IMPORT_MAX_CSV_MB:-2}
+      IMPORT_MAX_ZIP_MB: ${IMPORT_MAX_ZIP_MB:-100}
+      # logs + error tracking
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0}
     volumes:
       - uploads_data:/app/uploads      # photos, lesson files, exam papers
     depends_on:

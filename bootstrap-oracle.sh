@@ -23,7 +23,7 @@ die() { printf '\033[1;31m !! %s\033[0m\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
 [ -f "$COMPOSE_FILE" ] || die "docker-compose.prod.yml not found in $APP_DIR"
-[ -f "$APP_DIR/schema.sql" ] || die "schema.sql not found in $APP_DIR -- did the upload finish?"
+[ -f "$APP_DIR/alembic.ini" ] || die "alembic.ini not found in $APP_DIR -- did the upload finish?"
 
 # ---------------------------------------------------------------- packages
 if command -v apt-get >/dev/null 2>&1; then
@@ -116,9 +116,21 @@ MYSQL_USER=school
 MYSQL_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
 
 SECRET_KEY=$(openssl rand -hex 32)
-TOKEN_EXPIRE_HOURS=24
+# web frontends allowed to call the API (comma separated); mobile apps don't need this
+CORS_ORIGINS=
+# set to 1440 until your frontend renews tokens via /auth/refresh
+ACCESS_TOKEN_EXPIRE_MINUTES=15
 
 WEB_CONCURRENCY=$(( $(nproc) * 2 ))
+
+# email for password-reset codes (DEPLOY_ORACLE.md, step 9). Without
+# SMTP_HOST the API runs, but "forgot password" emails are not sent.
+SCHOOL_NAME=School
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USERNAME=
+SMTP_PASSWORD=
+EMAIL_FROM=
 EOF
   chmod 600 "$ENV_FILE"
   [ -n "$LOGIN_USER" ] && chown "$LOGIN_USER" "$ENV_FILE" || true
@@ -163,9 +175,10 @@ fi
 log "Done"
 cat <<EOF
   API      $URL/health
-  Swagger  $URL/docs
+  Swagger  disabled in production (set ENABLE_DOCS=true in .env.production to turn it on)
 
-  First login: admin / admin123  -- CHANGE IT NOW.
+  First login: admin / admin123  -- CHANGE IT NOW:
+    docker compose -f docker-compose.prod.yml --env-file .env.production exec api python -m app.cli set-password admin
 
   Logs     docker compose -f docker-compose.prod.yml --env-file .env.production logs -f api
   Restart  docker compose -f docker-compose.prod.yml --env-file .env.production restart api
@@ -173,4 +186,7 @@ cat <<EOF
 
   Secrets are in $ENV_FILE (chmod 600). Keep a copy somewhere safe --
   if you lose MYSQL_PASSWORD you cannot reconnect to the existing database volume.
+
+  Next: fill in SMTP_* in $ENV_FILE so "forgot password" emails go out,
+  then:  docker compose -f docker-compose.prod.yml --env-file .env.production up -d
 EOF

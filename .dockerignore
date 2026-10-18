@@ -16,3 +16,8 @@ README.md
 docker-compose*.yml
 Caddyfile
 backup.sh
+tests
+docs
+requirements-dev.txt
+pyproject.toml
+test_tidb.py

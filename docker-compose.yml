@@ -1,7 +1,6 @@
-# School Management backend — API + MySQL.
+# School Management backend — API + MySQL (local development).
 #   docker compose up -d --build
-# API on port 8000. schema.sql auto-loads on FIRST start (empty db volume).
-# Change MYSQL_ROOT_PASSWORD + SECRET_KEY before real use.
+# API on port 8000. The API container creates/upgrades the schema on start (Alembic).
 services:
   db:
     image: mysql:8.0
@@ -9,10 +8,9 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: schoolroot
       MYSQL_DATABASE: school_app
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     volumes:
       - db_data:/var/lib/mysql
-      # seed schema on first boot only
-      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pschoolroot"]
       interval: 5s
@@ -25,10 +23,13 @@ services:
     ports:
       - "8000:8000"
     environment:
+      APP_ENV: development
       DATABASE_URL: mysql+pymysql://root:schoolroot@db:3306/school_app
       MYSQL_SOCKET_PATH: ""            # force TCP inside Docker
-      SECRET_KEY: change-me-in-production
-      TOKEN_EXPIRE_HOURS: "24"
+      DB_SSL_CA: ""                    # the local MySQL container has no public TLS certificate
+      SECRET_KEY: local-development-secret-key-change-me
+      FORWARDED_ALLOW_IPS: "127.0.0.1" # port 8000 is exposed directly: don't trust X-Forwarded-For
+      LOG_FORMAT: text
     volumes:
       - uploads_data:/app/uploads      # persist photos / lesson files / papers
     depends_on:

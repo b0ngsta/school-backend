@@ -181,13 +181,18 @@ That installs Docker, adds swap, fixes the local firewall, generates
 Caddy, and installs the nightly backup cron. First build takes 3–6 minutes on
 ARM.
 
-When it prints `Done`, open `http://YOUR_PUBLIC_IP/docs`.
+When it prints `Done`, check `http://YOUR_PUBLIC_IP/health`.
 
 ## Step 7 — Log in and change the password immediately
 
 Default seeded account is `admin` / `admin123`, and it is published in your
 README. Change it, and the `principal` / `subadmin` ones too, before anything
-real goes in.
+real goes in:
+
+```bash
+cd /opt/school-api
+docker compose -f docker-compose.prod.yml --env-file .env.production exec api python -m app.cli set-password admin
+```
 
 ## Step 8 — Add HTTPS (free, 5 minutes)
 
@@ -208,6 +213,84 @@ docker compose -f docker-compose.prod.yml --env-file .env.production up -d
 Caddy fetches a Let's Encrypt certificate on the first request. Watch it with
 `docker compose -f docker-compose.prod.yml --env-file .env.production logs -f caddy`.
 
+## Step 9 — Email for "forgot password"
+
+Password-reset codes go out by email. Pick a provider (table in
+`docs/OPERATIONS.md`; Amazon SES Mumbai, Zoho ZeptoMail and Brevo all work)
+and fill these in `/opt/school-api/.env.production`:
+
+```bash
+SCHOOL_NAME="Green Valley School"
+SMTP_HOST=smtp.zeptomail.in
+SMTP_PORT=587                  # Oracle blocks outgoing port 25; 587 and 465 work
+SMTP_USERNAME=...
+SMTP_PASSWORD=...
+EMAIL_FROM="Green Valley School <no-reply@yourschool.in>"
+```
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+```
+
+Add the SPF/DKIM records your provider shows to your domain's DNS, or codes
+land in spam. To test: give the admin account an email (`PUT /users/{id}`),
+then `POST /auth/forgot-password {"login": "admin"}` and check the inbox.
+Delivery errors appear in `... logs api` (search for "Email delivery").
+
+## Step 10 — Bring your existing data from TiDB (optional)
+
+The stack starts with an empty database (plus the seeded logins). To keep
+the students, fees and history you already have in TiDB Cloud:
+
+**a. Dump TiDB from your Mac** (`brew install mysql-client`; host, user and
+database name are on the TiDB Cloud *Connect* page):
+
+```bash
+/opt/homebrew/opt/mysql-client/bin/mysqldump   -h gateway01.ap-southeast-1.prod.aws.tidbcloud.com -P 4000 -u 'xxxxxxxx.root' -p   --ssl-mode=VERIFY_IDENTITY --ssl-ca=/etc/ssl/cert.pem   --single-transaction --skip-lock-tables --no-tablespaces   --column-statistics=0 --set-gtid-purged=OFF   YOUR_DB_NAME > tidb_dump.sql
+scp -i ~/.ssh/oracle_school tidb_dump.sql ubuntu@YOUR_PUBLIC_IP:/opt/school-api/backups/
+```
+
+(If mysqldump complains, TiDB Cloud's console *Export* or the `dumpling`
+tool produce the same SQL.)
+
+**b. Load it on the server** and let the migrations upgrade it:
+
+```bash
+cd /opt/school-api
+DC="docker compose -f docker-compose.prod.yml --env-file .env.production"
+./backup.sh                                   # copy of the fresh database, just in case
+$DC stop api
+$DC exec -T db sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE school_app; CREATE DATABASE school_app CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"'
+$DC exec -T db sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" school_app' < backups/tidb_dump.sql
+$DC run --rm --entrypoint python api -m app.cli check-data   # duplicates / extra principals block the upgrade
+$DC up -d api
+$DC logs -f api                               # "Running upgrade …" lines, then the server starts
+```
+
+If `check-data` lists duplicate roll/admission numbers or a second principal,
+fix them first (or start once with `MIGRATE_FAIL_OK=true`, fix them in the app,
+then restart). The data in TiDB is untouched, so you can repeat this.
+
+**c. Photos and files.** If the old server has an `uploads/` folder, copy it in:
+
+```bash
+scp -r -i ~/.ssh/oracle_school uploads ubuntu@YOUR_PUBLIC_IP:/tmp/old-uploads
+docker run --rm -v school-api_uploads_data:/data -v /tmp/old-uploads:/src alpine:3 \
+  sh -c 'cp -a /src/. /data/ && chown -R 10001:10001 /data'
+```
+
+**d.** Once the app runs on the new server, change (or delete) the TiDB
+user's password: it was exposed in an old test file.
+
+## After launch
+
+- [ ] Seeded passwords changed (Step 7) — `admin`, `principal`, `subadmin`, `coordinator`, `driver`
+- [ ] HTTPS on a hostname (Step 8)
+- [ ] Email working (Step 9); `python -m app.cli check-data` lists accounts with no email yet
+- [ ] `CORS_ORIGINS` = your web admin's address, in `.env.production`
+- [ ] `ACCESS_TOKEN_EXPIRE_MINUTES=1440` until the frontend uses `/auth/refresh`, then back to 15
+- [ ] Backups copied off the server (see below)
+
 ---
 
 ## Things that will bite you later
@@ -222,5 +305,5 @@ Caddy fetches a Let's Encrypt certificate on the first request. Watch it with
 - **ARM builds.** Both `python:3.11-slim` and `mysql:8.0` publish
   [arm64v8 images](https://hub.docker.com/_/mysql), so nothing special is needed
   — but if you ever add a dependency with no ARM wheel, the build will fail there.
-- The [pre-launch checklist in `DEPLOY.md`](./DEPLOY.md) still applies: wide-open
-  CORS, SHA-256 passwords, public `/docs`, simulated SMS.
+- The [pre-launch checklist in `DEPLOY.md`](./DEPLOY.md) still applies: seeded
+  passwords, `CORS_ORIGINS`, simulated SMS.

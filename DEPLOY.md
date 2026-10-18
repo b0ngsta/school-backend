@@ -81,8 +81,9 @@ docker compose -f docker-compose.prod.yml --env-file .env.production up -d --bui
 docker compose -f docker-compose.prod.yml --env-file .env.production ps
 ```
 
-`schema.sql` loads automatically on the **first** boot only, while the `db_data`
-volume is empty. It creates the tables and the seeded logins.
+On every start the API container runs `alembic upgrade head`: on an empty
+database it creates the tables and the seeded logins, afterwards it applies
+whatever migrations are new. `docker compose ... logs api` shows what ran.
 
 Verify:
 
@@ -93,14 +94,24 @@ curl -s -X POST https://api.yourschool.com/auth/login \
   -d '{"username":"admin","password":"admin123"}'
 ```
 
-Then open `https://api.yourschool.com/docs`.
+Swagger (`/docs`) is off in production; set `ENABLE_DOCS=true` in
+`.env.production` if you want it on a staging box.
 
 ## 6. Immediately after first boot
 
-1. Log in as `admin` / `admin123` and **change the password**. Do the same for
-   `principal` and `subadmin`, or delete the ones you don't need.
-2. Point your frontend at the new domain.
-3. Tighten CORS (see the checklist below) and redeploy.
+1. **Change the seeded passwords** (they are public):
+
+   ```bash
+   DC="docker compose -f docker-compose.prod.yml --env-file .env.production"
+   $DC exec api python -m app.cli set-password admin
+   $DC exec api python -m app.cli set-password principal   # and subadmin, coordinator, driver
+   ```
+
+   Or delete the accounts you don't need. Setting `ENFORCE_PASSWORD_CHANGE=true`
+   blocks any account still on a seeded password until it is changed.
+2. Point your frontend at the new domain and put its origin in `CORS_ORIGINS`.
+3. Make sure the frontend renews tokens with `/auth/refresh` (see
+   `docs/AUTH.md`). Until it does, set `ACCESS_TOKEN_EXPIRE_MINUTES=1440`.
 
 ---
 
@@ -122,15 +133,18 @@ docker compose -f docker-compose.prod.yml --env-file .env.production logs -f api
 docker compose -f docker-compose.prod.yml --env-file .env.production logs -f caddy
 ```
 
-**Schema changes on a live database.** `schema.sql` drops tables — never run it
-against production. Run the additive migrations instead:
+**Schema changes on a live database** are Alembic migrations (`migrations/versions/`).
+They run automatically when the API container starts; to run or inspect them by hand:
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env.production \
-  exec -T db sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" school_app' < migration_v8.sql
+DC="docker compose -f docker-compose.prod.yml --env-file .env.production"
+$DC exec api alembic current          # where the database is
+$DC exec api alembic upgrade head     # apply pending migrations
+$DC exec api python -m app.cli check-data   # duplicates / extra principals that would block a migration
 ```
 
-Take a backup first.
+Take a backup first (`./backup.sh`). A failing migration stops the container
+from starting, with the reason in `$DC logs api`.
 
 **Backups**
 
@@ -151,23 +165,21 @@ footer of `backup.sh`.
 These are in the code today and are worth fixing before real student data goes in.
 None of them block a first deploy; all of them matter for one.
 
-- [ ] **CORS is wide open.** `app/main.py` sets `allow_origins=["*"]`. Replace with
-      your actual frontend origin(s).
-- [ ] **Passwords are salted SHA-256.** `app/security.py` — the README already flags
-      this. Move to bcrypt or argon2 (`passlib[bcrypt]`) and force a reset.
+- [x] ~~CORS is wide open~~ — set `CORS_ORIGINS` (no wildcard in production).
+- [x] ~~Passwords are salted SHA-256~~ — Argon2id; old hashes upgrade on login.
 - [ ] **Seeded logins are public knowledge.** `admin/admin123` etc. are in the
-      README and in `schema.sql`. Change or remove them on day one.
-- [ ] **`/docs` is publicly readable.** Fine for a staging API, less so for a live
-      one. Either IP-restrict it in the `Caddyfile` (commented block is ready) or
-      pass `docs_url=None, redoc_url=None` to `FastAPI()` in production.
-- [ ] **SMS is simulated.** `_send_sms()` in `app/routers/sms.py` is a stub — wire
+      README and in `schema.sql`. Change them on day one (`python -m app.cli set-password`).
+- [x] ~~`/docs` is publicly readable~~ — off in production unless `ENABLE_DOCS=true`.
+- [ ] **SMS is simulated.** `_send_sms()` in `app/services/sms.py` is a stub — wire
       up MSG91/Twilio before anyone relies on it.
 - [ ] **Payments are stubbed.** `/transactions` records history but there is no
       real gateway integration.
-- [ ] **Uploads are served by the app** from a Docker volume. That works; if the
-      volume grows past a few GB, move to S3 and serve via CDN.
-- [ ] **No error tracking.** Sentry (`sentry-sdk[fastapi]`) takes ten minutes and
-      saves hours.
+- [ ] **Email for password resets.** Set `SMTP_*` and `EMAIL_FROM` in
+      `.env.production` (see `DEPLOY_ORACLE.md`, step 9); without them no
+      reset codes are sent.
+- [x] ~~Uploads only on the server's disk~~ — `STORAGE_BACKEND=s3` keeps them in a
+      bucket when you outgrow one server (`docs/OPERATIONS.md`).
+- [x] ~~No error tracking~~ — set `SENTRY_DSN`.
 
 ---
 
@@ -182,8 +194,12 @@ DB volume was *initialised* with; if you changed it after first boot, the old
 password is still baked into the volume. Either set it back, or wipe and restore:
 `docker compose ... down -v` (**destroys data**) then restore from a backup.
 
-**"Table doesn't exist"** — `schema.sql` didn't run because `db_data` already had
-content. Load it manually into the running DB, or start from an empty volume.
+**"Table doesn't exist"** — migrations didn't run. Check `$DC logs api` for the
+Alembic output, or run `$DC exec api alembic upgrade head`.
+
+**API restarts in a loop after an upgrade** — usually a migration that refused
+to run (e.g. duplicate roll numbers). The log names the rows; fix them, or start
+once with `MIGRATE_FAIL_OK=true` to get the app up while you fix the data.
 
 **Everything is fine but slow** — raise `WEB_CONCURRENCY` in `.env.production`
 (roughly 2× vCPU; the DB calls are blocking, so workers help) and redeploy.

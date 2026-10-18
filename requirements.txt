@@ -1,6 +1,15 @@
 fastapi==0.115.8
 uvicorn[standard]==0.34.0
 PyMySQL==1.1.1
+cryptography==50.0.2          # MySQL 8 caching_sha2_password over plain TCP (docker MySQL)
 pydantic==2.10.6
 python-multipart==0.0.20
 python-dotenv==1.0.1
+PyJWT==2.15.1                 # access tokens
+argon2-cffi==25.1.0           # password hashing
+Pillow==12.3.0                # image validation / re-encoding
+tzdata==2026.5                # timezone data for zoneinfo in slim images
+alembic==1.20.0               # database migrations
+SQLAlchemy==2.1.4             # used by Alembic only (the app itself uses PyMySQL directly)
+boto3==1.43.111               # S3-compatible upload storage (STORAGE_BACKEND=s3)
+sentry-sdk==2.71.0            # error tracking (SENTRY_DSN)

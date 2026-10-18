@@ -10,8 +10,15 @@
 {$SITE_ADDRESS::80} {
 	encode zstd gzip
 
-	# uploads can be large (10 MB cap in the app) -- leave headroom
-	request_body {
+	# Upload size caps (the app checks again, per file). Bulk import takes a
+	# CSV plus a photos ZIP (IMPORT_MAX_CSV_MB + IMPORT_MAX_ZIP_MB in the app);
+	# everything else is at most 15 MB per file.
+	@bulk_import path /imports/users
+	request_body @bulk_import {
+		max_size 110MB
+	}
+	@everything_else not path /imports/users
+	request_body @everything_else {
 		max_size 20MB
 	}
 
