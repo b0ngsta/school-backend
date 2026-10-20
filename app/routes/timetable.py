@@ -1,5 +1,7 @@
 """Weekly timetable — managers assign; teachers view their own.
 day: 0=Mon … 6=Sun · period: 1..12"""
+from datetime import date
+
 from fastapi import APIRouter, Depends
 
 from app.core.roles import MANAGERS, STAFF
@@ -18,6 +20,14 @@ staff = require_roles(*STAFF)
 @router.get("/mine")
 def my_timetable(user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
     return timetable_service.my_timetable(db, user)
+
+
+@router.get("/week")
+def week_timetable(start: date | None = None, teacher_id: int | None = None,
+                   user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """The weekly template for the week of `start` (snapped to Monday) plus holidays,
+    leave days and substitutions. Managers may pass `teacher_id`."""
+    return timetable_service.week(db, user, start, teacher_id)
 
 
 @router.get("")

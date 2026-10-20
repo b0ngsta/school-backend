@@ -21,7 +21,7 @@ from app.models.students import (
     StudentCreate,
     StudentUpdate,
 )
-from app.services import access, audit, pagination, storage
+from app.services import access, audit, homework, pagination, storage
 
 STUDENT_SELECT = (
     "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.photo_path, u.is_active, "
@@ -169,12 +169,13 @@ def attendance_history(db: Db, user: CurrentUser, student_id: int) -> dict:
 # ================= homework =================
 
 def list_homework(db: Db, user: CurrentUser, student_id: int) -> list[dict]:
+    """Class homework of the student's section merged with per-student rows,
+    newest first. `scope` is "class" or "student"; for class rows `id` is the
+    class homework id (clients key rows by scope + id)."""
     _viewable_student(db, user, student_id)
     return db.all(
-        "SELECT h.*, u.full_name AS created_by_name FROM homeworks h "
-        "JOIN users u ON u.id = h.created_by "
-        "WHERE h.student_id = %s ORDER BY h.created_at DESC",
-        (student_id,),
+        homework.student_homework_sql("hw.*") + " ORDER BY " + homework.HOMEWORK_ORDER,
+        (student_id, student_id, student_id),
     )
 
 
@@ -188,7 +189,17 @@ def add_homework(db: Db, user: CurrentUser, student_id: int, body: HomeworkCreat
     return {"id": homework_id}
 
 
-def update_homework(db: Db, user: CurrentUser, student_id: int, homework_id: int, body: HomeworkUpdate) -> dict:
+def update_homework(db: Db, user: CurrentUser, student_id: int, homework_id: int, body: HomeworkUpdate,
+                    scope: str | None = None) -> dict:
+    if scope == "class":  # this student's status on a class homework
+        with db.transaction():
+            _viewable_student(db, user, student_id)
+            if body.status is None:
+                raise BadRequest("status is required")
+            if not homework.class_homework_for_student(db, student_id, homework_id):
+                raise NotFound("Homework not found")
+            homework.set_status(db, user, homework_id, [(student_id, body.status)])
+        return {"updated": homework_id}
     with db.transaction():
         _viewable_student(db, user, student_id)
         hw = db.one("SELECT * FROM homeworks WHERE id = %s AND student_id = %s FOR UPDATE",
@@ -208,8 +219,11 @@ def update_homework(db: Db, user: CurrentUser, student_id: int, homework_id: int
     return {"updated": homework_id}
 
 
-def delete_homework(db: Db, user: CurrentUser, student_id: int, homework_id: int) -> dict:
+def delete_homework(db: Db, user: CurrentUser, student_id: int, homework_id: int,
+                    scope: str | None = None) -> dict:
     _viewable_student(db, user, student_id)
+    if scope == "class":
+        raise Conflict("Class homework is deleted from the class's homework list, not per student")
     if db.execute("DELETE FROM homeworks WHERE id = %s AND student_id = %s",
                   (homework_id, student_id)).rowcount == 0:
         raise NotFound("Homework not found")

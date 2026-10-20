@@ -13,7 +13,7 @@ from app.core.roles import MANAGERS, NON_STUDENT
 from app.db import Db
 from app.dependencies import get_db, page_params, paged, require_roles
 from app.models.auth import CurrentUser
-from app.models.hr import HolidayCreate, LeaveCreate, LeaveReview, SalaryCreate
+from app.models.hr import HolidayCreate, LeaveCreate, LeaveReview, LeaveUpdate, SalaryCreate
 from app.services import hr as hr_service
 from app.services.pagination import Page
 
@@ -63,6 +63,25 @@ def my_leaves(response: Response, page: Page = Depends(page_params),
 def list_leaves(response: Response, status_filter: str | None = None, page: Page = Depends(page_params),
                 actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
     return paged(response, hr_service.list_leaves(db, status_filter, page))
+
+
+@router.get("/leaves/{leave_id}")
+def get_leave(leave_id: int, actor: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """The leave with its substitution requests (the applicant or managers)."""
+    return hr_service.get_leave(db, actor, leave_id)
+
+
+@router.put("/leaves/{leave_id}")
+def update_leave(leave_id: int, body: LeaveUpdate, actor: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """The applicant edits a pending request; requests outside the new dates are cancelled."""
+    return hr_service.update_leave(db, actor, leave_id, body)
+
+
+@router.delete("/leaves/{leave_id}", status_code=204)
+def delete_leave(leave_id: int, actor: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """Withdraw a pending request, or cancel an approved leave that hasn't started."""
+    hr_service.delete_leave(db, actor, leave_id)
+    return Response(status_code=204)
 
 
 @router.put("/leaves/{leave_id}/approve")
@@ -123,6 +142,6 @@ def my_attendance_history(actor: CurrentUser = Depends(staff), db: Db = Depends(
 
 
 @router.get("/staff-attendance")
-def staff_attendance_by_day(day: date | None = None, actor: CurrentUser = Depends(manager),
-                            db: Db = Depends(get_db)):
-    return hr_service.staff_attendance_by_day(db, day)
+def staff_attendance_by_day(response: Response, day: date | None = None, page: Page = Depends(page_params),
+                            actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
+    return paged(response, hr_service.staff_attendance_by_day(db, day, page))

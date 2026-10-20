@@ -22,7 +22,7 @@ from app.core.config import settings
 from app.core.security import sign_file_path, verify_file_signature
 
 URL_PREFIX = "uploads"
-FILE_FIELDS = frozenset({"photo_path", "screenshot_path", "paper_path"})
+FILE_FIELDS = frozenset({"photo_path", "screenshot_path", "paper_path", "requester_photo", "substitute_photo"})
 
 _UPLOAD_ROOT = os.path.abspath(settings.upload_dir)
 

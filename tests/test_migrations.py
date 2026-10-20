@@ -49,7 +49,7 @@ def test_fresh_install_creates_everything(scratch_db):
     tables = {t for (t,) in _query(scratch_db, "SHOW TABLES")}
     assert {"users", "auth_sessions", "audit_logs", "calendar_events", "alembic_version"} <= tables
     assert _query(scratch_db, "SELECT COUNT(*) FROM users WHERE must_change_password = 1")[0][0] == 5
-    assert _query(scratch_db, "SELECT version_num FROM alembic_version")[0][0] == "0004_password_reset_principal"
+    assert _query(scratch_db, "SELECT version_num FROM alembic_version")[0][0] == "0008_class_homework"
 
 
 def test_legacy_schema_is_adopted_and_ends_identical(scratch_db):

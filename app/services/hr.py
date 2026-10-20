@@ -2,14 +2,15 @@
 salary statements and daily check-in / check-out."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from app.core.clock import school_now, school_today
-from app.core.errors import BadRequest, Conflict, DuplicateKey, NotFound
+from app.core.errors import BadRequest, Conflict, DuplicateKey, Forbidden, NotFound
+from app.core.roles import MANAGERS
 from app.db import Db
 from app.models.auth import CurrentUser
-from app.models.hr import HolidayCreate, LeaveCreate, SalaryCreate
-from app.services import audit, pagination
+from app.models.hr import HolidayCreate, LeaveCreate, LeaveUpdate, SalaryCreate
+from app.services import audit, notify, pagination, substitutions
 
 # ====================== holidays ======================
 
@@ -70,6 +71,10 @@ LEAVE_SELECT = (
 )
 
 
+def _leave_dates(leave: dict) -> str:
+    return notify.date_range(leave["from_date"], leave["to_date"])
+
+
 def request_leave(db: Db, actor: CurrentUser, body: LeaveCreate) -> dict:
     with db.transaction():
         # lock the requester's row so two quick submits can't both pass the check
@@ -80,12 +85,20 @@ def request_leave(db: Db, actor: CurrentUser, body: LeaveCreate) -> dict:
             "INSERT INTO leave_requests (user_id, from_date, to_date, reason) VALUES (%s, %s, %s, %s)",
             (actor.id, body.from_date, body.to_date, body.reason),
         ).lastrowid
+        requester = {"id": actor.id, "full_name": actor.full_name}
+        substitutions.create_many(db, requester, body.substitutions, leave_id)
+        substitutions.link_standalone(db, actor.id, leave_id, body.from_date, body.to_date)
+        notify.notify(db, notify.manager_ids(db, exclude=actor.id), "leave",
+                      f"{actor.full_name} applied for leave {_leave_dates(body.model_dump())}", body.reason,
+                      data=notify.route("leave", student=False))
     return {"id": leave_id, "status": "pending"}
 
 
 def my_leaves(db: Db, actor: CurrentUser, page: pagination.Page | None = None) -> pagination.PageResult:
-    return pagination.fetch(db, LEAVE_SELECT + " WHERE l.user_id = %s", (actor.id,),
-                            "l.created_at DESC, l.id DESC", page)
+    result = pagination.fetch(db, LEAVE_SELECT + " WHERE l.user_id = %s", (actor.id,),
+                              "l.created_at DESC, l.id DESC", page)
+    substitutions.coverage(db, result.rows)
+    return result
 
 
 def list_leaves(db: Db, status_filter: str | None, page: pagination.Page | None = None) -> pagination.PageResult:
@@ -93,7 +106,68 @@ def list_leaves(db: Db, status_filter: str | None, page: pagination.Page | None 
     if status_filter:
         sql += " WHERE l.status = %s"
         params = (status_filter,)
-    return pagination.fetch(db, sql, params, "l.status = 'pending' DESC, l.created_at DESC, l.id DESC", page)
+    result = pagination.fetch(db, sql, params, "l.status = 'pending' DESC, l.created_at DESC, l.id DESC", page)
+    substitutions.coverage(db, result.rows)
+    return result
+
+
+def _visible_leave(db: Db, actor: CurrentUser, leave_id: int) -> dict:
+    leave = db.one(LEAVE_SELECT + " WHERE l.id = %s", (leave_id,))
+    if not leave or (leave["user_id"] != actor.id and actor.user_type not in MANAGERS):
+        raise NotFound("Leave request not found")
+    return leave
+
+
+def get_leave(db: Db, actor: CurrentUser, leave_id: int) -> dict:
+    leave = _visible_leave(db, actor, leave_id)
+    substitutions.coverage(db, [leave])
+    leave["substitutions"] = substitutions.for_leave(db, leave_id)
+    return leave
+
+
+def update_leave(db: Db, actor: CurrentUser, leave_id: int, body: LeaveUpdate) -> dict:
+    with db.transaction():
+        _visible_leave(db, actor, leave_id)
+        leave = db.one("SELECT * FROM leave_requests WHERE id = %s FOR UPDATE", (leave_id,))
+        if leave["user_id"] != actor.id:
+            raise Forbidden("Only the applicant can edit a leave request")
+        if leave["status"] != "pending":
+            raise Conflict("Only pending requests can be edited")
+        db.execute("UPDATE leave_requests SET from_date = %s, to_date = %s, reason = %s WHERE id = %s",
+                   (body.from_date, body.to_date, body.reason, leave_id))
+        substitutions.cancel_for_leave(db, leave_id, keep_from=body.from_date, keep_to=body.to_date)
+        requester = {"id": actor.id, "full_name": actor.full_name}
+        substitutions.create_many(db, requester, body.substitutions, leave_id)
+        substitutions.link_standalone(db, actor.id, leave_id, body.from_date, body.to_date)
+    return get_leave(db, actor, leave_id)
+
+
+def delete_leave(db: Db, actor: CurrentUser, leave_id: int) -> None:
+    """Owner: a pending request, or an approved leave that hasn't started.
+    Managers: any leave that hasn't started. Pending ones are deleted;
+    approved ones become 'cancelled' (history is kept)."""
+    today = school_today()
+    with db.transaction():
+        _visible_leave(db, actor, leave_id)
+        leave = db.one("SELECT * FROM leave_requests WHERE id = %s FOR UPDATE", (leave_id,))
+        is_owner, not_started = leave["user_id"] == actor.id, leave["from_date"] > today
+        if leave["status"] not in ("pending", "approved"):
+            raise Conflict(f"This leave request is already {leave['status']}")
+        allowed = (is_owner and (leave["status"] == "pending" or not_started)) or (
+            actor.user_type in MANAGERS and not_started)
+        if not allowed:
+            raise Conflict("This leave has already started")
+        substitutions.cancel_for_leave(db, leave_id)
+        if leave["status"] == "pending":
+            db.execute("DELETE FROM leave_requests WHERE id = %s", (leave_id,))
+        else:
+            db.execute("UPDATE leave_requests SET status = 'cancelled' WHERE id = %s", (leave_id,))
+            applicant = db.scalar("SELECT full_name FROM users WHERE id = %s", (leave["user_id"],))
+            notify.notify(db, notify.manager_ids(db, exclude=actor.id), "leave",
+                          f"{applicant}'s approved leave {_leave_dates(leave)} was cancelled",
+                          data=notify.route("leave", student=False))
+        audit.record(db, actor, "leave.delete" if leave["status"] == "pending" else "leave.cancel",
+                     "leave_request", leave_id, {"user_id": leave["user_id"]})
 
 
 def review_leave(db: Db, actor: CurrentUser, leave_id: int, new_status: str, note: str | None) -> dict:
@@ -108,7 +182,11 @@ def review_leave(db: Db, actor: CurrentUser, leave_id: int, new_status: str, not
             "WHERE id=%s AND status='pending'",
             (new_status, actor.id, note, leave_id),
         )
+        if new_status == "rejected":
+            substitutions.cancel_for_leave(db, leave_id)
         audit.record(db, actor, f"leave.{new_status}", "leave_request", leave_id, {"user_id": leave["user_id"]})
+        notify.notify(db, [leave["user_id"]], "leave", f"Your leave ({_leave_dates(leave)}) was {new_status}",
+                      note, data=notify.route("leave", student=False))
     return {new_status: leave_id}
 
 
@@ -161,10 +239,26 @@ def _now_time() -> str:
     return school_now().strftime("%H:%M:%S")
 
 
+def _clock(value) -> str | None:
+    """TIME column -> "HH:MM:SS" (PyMySQL returns a timedelta, which JSON would
+    otherwise turn into a number of seconds)."""
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, timedelta):
+        seconds = int(value.total_seconds()) % 86400
+        return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+    return value.strftime("%H:%M:%S")
+
+
+def _times(row: dict) -> dict:
+    row["in_time"], row["out_time"] = _clock(row.get("in_time")), _clock(row.get("out_time"))
+    return row
+
+
 def my_today(db: Db, actor: CurrentUser) -> dict:
     today = school_today()
     row = db.one("SELECT * FROM staff_attendance WHERE user_id = %s AND date = %s", (actor.id, today))
-    return row or {"in_time": None, "out_time": None, "date": str(today)}
+    return _times(row) if row else {"in_time": None, "out_time": None, "date": str(today)}
 
 
 def check_in(db: Db, actor: CurrentUser) -> dict:
@@ -197,15 +291,19 @@ def check_out(db: Db, actor: CurrentUser) -> dict:
 
 
 def my_attendance_history(db: Db, actor: CurrentUser) -> list[dict]:
-    return db.all(
+    return [_times(r) for r in db.all(
         "SELECT * FROM staff_attendance WHERE user_id = %s ORDER BY date DESC LIMIT 60", (actor.id,)
-    )
+    )]
 
 
-def staff_attendance_by_day(db: Db, day: date | None) -> list[dict]:
-    return db.all(
+def staff_attendance_by_day(db: Db, day: date | None, page: pagination.Page | None = None) -> pagination.PageResult:
+    result = pagination.fetch(
+        db,
         "SELECT a.*, u.full_name, u.user_type, u.photo_path "
         "FROM staff_attendance a JOIN users u ON u.id = a.user_id "
-        "WHERE a.date = %s ORDER BY u.full_name",
+        "WHERE a.date = %s",
         (day or school_today(),),
+        "u.full_name, a.id",
+        page,
     )
+    return pagination.PageResult([_times(r) for r in result.rows], result.total)

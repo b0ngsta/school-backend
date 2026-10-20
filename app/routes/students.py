@@ -5,7 +5,7 @@ Permissions:
 - add/edit students: managers, or the section's CLASS teacher
 - records: managers, or any teacher assigned to the section
 """
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from app.core.roles import STAFF
 from app.db import Db
@@ -25,6 +25,8 @@ from app.services.pagination import Page
 router = APIRouter(prefix="/students", tags=["students"])
 
 staff = require_roles(*STAFF)
+
+HomeworkScope = Query(None, pattern="^(class|student)$", description="class = a class homework (/homework)")
 
 
 @router.post("", status_code=201)
@@ -81,15 +83,17 @@ def add_homework(student_id: int, body: HomeworkCreate, user: CurrentUser = Depe
 
 
 @router.put("/{student_id}/homework/{homework_id}")
-def update_homework(student_id: int, homework_id: int, body: HomeworkUpdate,
+def update_homework(student_id: int, homework_id: int, body: HomeworkUpdate, scope: str | None = HomeworkScope,
                     user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
-    return student_service.update_homework(db, user, student_id, homework_id, body)
+    """`?scope=class`: set this student's status on a class homework (`id` = class homework id)."""
+    return student_service.update_homework(db, user, student_id, homework_id, body, scope)
 
 
 @router.delete("/{student_id}/homework/{homework_id}")
-def delete_homework(student_id: int, homework_id: int, user: CurrentUser = Depends(staff),
-                    db: Db = Depends(get_db)):
-    return student_service.delete_homework(db, user, student_id, homework_id)
+def delete_homework(student_id: int, homework_id: int, scope: str | None = HomeworkScope,
+                    user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """Per-student homework only; class homework (`?scope=class`) → 409."""
+    return student_service.delete_homework(db, user, student_id, homework_id, scope)
 
 
 # ================= remarks =================

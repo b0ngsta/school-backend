@@ -17,7 +17,7 @@ from app.core.context import client_ip
 from app.core.errors import BadRequest, Forbidden, Unauthorized
 from app.db import Db
 from app.models.auth import CurrentUser, TokenResponse
-from app.services import audit, login_throttle, sessions
+from app.services import audit, login_throttle, notifications, sessions
 
 INVALID_CREDENTIALS = "Invalid username or password"
 INVALID_TOKEN = "Invalid or expired token"
@@ -140,12 +140,14 @@ def logout(db: Db, user: CurrentUser | None, refresh_token: str | None) -> None:
     session_id = user.session_id if user else sessions.session_id_from_refresh_token(db, refresh_token)
     if session_id:
         sessions.revoke(db, session_id, "logout")
+        notifications.forget_session_devices(db, session_id)  # no more pushes to this device
 
 
 def logout_everywhere(db: Db, user: CurrentUser) -> None:
     with db.transaction():
         db.execute("UPDATE users SET token_version = token_version + 1 WHERE id = %s", (user.id,))
         sessions.revoke_all(db, user.id, "logout_all")
+        notifications.forget_user_devices(db, user.id)
         audit.record(db, user, "auth.logout_all", "user", user.id)
 
 

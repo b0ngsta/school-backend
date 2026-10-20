@@ -16,7 +16,7 @@ from app.core.errors import BadRequest, Conflict, NotFound
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.fees import ClaimReview, FeeCreate, FeeGenerate
-from app.services import audit, pagination, storage
+from app.services import audit, notify, pagination, storage
 from app.services.payments import new_reference
 
 # effective status exposes 'overdue' (pending + past due date) without storing it
@@ -98,6 +98,13 @@ def generate_class_fees(db: Db, actor: CurrentUser, body: FeeGenerate) -> dict:
             "WHERE sp.class_id = %s AND u.is_active = 1",
             (body.class_id,),
         )
+        new_for = [r["user_id"] for r in db.all(
+            "SELECT sp.user_id FROM student_profiles sp "
+            "JOIN users u ON u.id = sp.user_id "
+            "WHERE sp.class_id = %s AND u.is_active = 1 "
+            "AND NOT EXISTS (SELECT 1 FROM fees f WHERE f.student_id = sp.user_id AND f.title = %s)",
+            (body.class_id, body.title),
+        )]
         created = db.execute(
             "INSERT INTO fees (student_id, title, amount, due_date) "
             "SELECT sp.user_id, %s, %s, %s FROM student_profiles sp "
@@ -110,6 +117,7 @@ def generate_class_fees(db: Db, actor: CurrentUser, body: FeeGenerate) -> dict:
         if created:
             audit.record(db, actor, "fee.generate", "class", body.class_id,
                          {"title": body.title, "created": created})
+            _notify_new_fee(db, new_for, body.title, cls["fee_amount"], body.due_date)
     return {"created": created, "students": int(students or 0)}
 
 
@@ -145,7 +153,20 @@ def create_fee(db: Db, actor: CurrentUser, body: FeeCreate) -> dict:
             (body.student_id, body.title, body.amount, body.due_date),
         ).lastrowid
         audit.record(db, actor, "fee.create", "fee", fee_id, body.model_dump())
+        _notify_new_fee(db, [body.student_id], body.title, body.amount, body.due_date)
     return {"id": fee_id}
+
+
+def _notify_new_fee(db: Db, student_ids: list[int], title: str, amount, due_date) -> None:
+    text = f"New fee: {title} — {notify.inr(amount)}"
+    if due_date:
+        text += f" due {notify.day_month(due_date)}"
+    notify.notify(db, student_ids, "fee", text, data=notify.route("fee", student=True))
+
+
+def _notify_paid(db: Db, fee: dict) -> None:
+    notify.notify(db, [fee["student_id"]], "fee", f"Payment received: {fee['title']} {notify.inr(fee['amount'])}",
+                  data=notify.route("fee", student=True))
 
 
 def _mark_paid(db: Db, fee: dict, method: str) -> str | None:
@@ -176,6 +197,7 @@ def pay_fee(db: Db, actor: CurrentUser, fee_id: int, method: str) -> dict:
             raise Conflict("Already paid")
         audit.record(db, actor, "fee.pay", "fee", fee_id,
                      {"method": method, "amount": fee["amount"], "reference": reference})
+        _notify_paid(db, fee)
     return {"paid": fee_id, "reference": reference}
 
 
@@ -271,6 +293,8 @@ def approve_claim(db: Db, actor: CurrentUser, claim_id: int, body: ClaimReview) 
         reference = _mark_paid(db, fee, method) if fee and fee["status"] != "paid" else None
         audit.record(db, actor, "fee_claim.approve", "fee_claim", claim_id,
                      {"fee_id": claim["fee_id"], "method": method, "reference": reference})
+        if fee:
+            _notify_paid(db, fee)
     return {"approved": claim_id, "reference": reference}
 
 
@@ -284,4 +308,11 @@ def reject_claim(db: Db, actor: CurrentUser, claim_id: int, body: ClaimReview) -
         )
         audit.record(db, actor, "fee_claim.reject", "fee_claim", claim_id,
                      {"fee_id": claim["fee_id"], "note": body.note})
+        fee = db.one("SELECT title FROM fees WHERE id = %s", (claim["fee_id"],))
+        fee_title = fee["title"] if fee else "fee"
+        if body.note:
+            title, text = f"Payment proof rejected: {body.note}", fee_title
+        else:
+            title, text = f"Payment proof rejected: {fee_title}", None
+        notify.notify(db, [claim["student_id"]], "fee", title, text, data=notify.route("fee", student=True))
     return {"rejected": claim_id}

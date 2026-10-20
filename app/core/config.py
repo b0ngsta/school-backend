@@ -91,6 +91,10 @@ class Settings:
     cors_origins: tuple[str, ...]
     enable_docs: bool
 
+    # push notifications + scheduled jobs
+    firebase_credentials: str     # service-account JSON (a file path or the JSON itself); "" = no push
+    jobs_secret: str              # X-Jobs-Secret for POST /internal/jobs/*; "" = jobs endpoint off
+
     @property
     def is_production(self) -> bool:
         return self.env == "production"
@@ -151,7 +155,7 @@ def load_settings() -> Settings:
     return Settings(
         env=env,
         secret_key=secret_key,
-        timezone=env_str("APP_TIMEZONE", "Asia/Kolkata"),
+        timezone=env_str("APP_TIMEZONE", env_str("SCHOOL_TZ", "Asia/Kolkata")),
         db=database_settings(),
         access_token_minutes=env_int("ACCESS_TOKEN_EXPIRE_MINUTES", 15, minimum=1),
         refresh_idle_days=env_int("REFRESH_TOKEN_IDLE_DAYS", 30, minimum=1),
@@ -200,6 +204,8 @@ def load_settings() -> Settings:
         sentry_traces_sample_rate=min(max(traces_rate, 0.0), 1.0),
         cors_origins=cors,
         enable_docs=env_bool("ENABLE_DOCS", env == "development"),
+        firebase_credentials=env_str("FIREBASE_CREDENTIALS", ""),
+        jobs_secret=env_str("JOBS_SECRET", ""),
     )
 
 

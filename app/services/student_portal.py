@@ -6,6 +6,7 @@ client, so a student can only ever see their own data.
 from __future__ import annotations
 
 from app.db import Db
+from app.services import homework as class_homework
 from app.services import pagination
 from app.services.calendar import get_calendar_payload
 from app.services.hr import list_holidays
@@ -51,7 +52,11 @@ def dashboard(db: Db, uid: int) -> dict:
     me = profile(db, uid)
     counts = db.one(
         "SELECT "
-        "(SELECT COUNT(*) FROM homeworks WHERE student_id = %(uid)s AND status = 'pending') AS pending_homework, "
+        "(SELECT COUNT(*) FROM homeworks WHERE student_id = %(uid)s AND status = 'pending') "
+        "+ (SELECT COUNT(*) FROM class_homework h JOIN student_profiles sp ON sp.section_id = h.section_id "
+        "   AND sp.class_id = h.class_id AND sp.user_id = %(uid)s "
+        "   LEFT JOIN homework_submissions hs ON hs.homework_id = h.id AND hs.student_id = %(uid)s "
+        "   WHERE COALESCE(hs.status, 'pending') = 'pending') AS pending_homework, "
         "(SELECT COUNT(*) FROM fees WHERE student_id = %(uid)s AND status = 'pending') AS fees_n, "
         "(SELECT COALESCE(SUM(amount), 0) FROM fees WHERE student_id = %(uid)s AND status = 'pending') AS fees_due, "
         "(SELECT COUNT(*) FROM attendance WHERE student_id = %(uid)s) AS att_total, "
@@ -93,14 +98,16 @@ def dashboard(db: Db, uid: int) -> dict:
 
 
 def homework(db: Db, uid: int, page: pagination.Page | None = None) -> pagination.PageResult:
+    """Class homework of the student's section merged with per-student rows
+    (`scope` "class" | "student"; clients key rows by scope + id)."""
     return pagination.fetch(
         db,
-        "SELECT h.id, h.title, h.due_date, h.status, h.note, h.created_at, "
-        "  u.full_name AS assigned_by "
-        "FROM homeworks h JOIN users u ON u.id = h.created_by "
-        "WHERE h.student_id = %s",
-        (uid,),
-        "h.created_at DESC, h.id DESC",
+        class_homework.student_homework_sql(
+            "hw.id, hw.title, hw.due_date, hw.status, hw.note, hw.created_at, hw.created_by_name AS assigned_by, "
+            "hw.subject, hw.scope, hw.homework_id"
+        ),
+        (uid, uid, uid),
+        class_homework.HOMEWORK_ORDER,
         page,
     )
 
