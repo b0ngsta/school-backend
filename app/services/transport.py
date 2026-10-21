@@ -9,23 +9,24 @@ from app.models.transport import VehicleCreate, VehicleUpdate
 def stats(db: Db) -> dict:
     row = db.one(
         "SELECT COUNT(*) AS total, SUM(status='active') AS active, "
-        "COUNT(DISTINCT route_name) AS routes FROM vehicles"
+        "COUNT(DISTINCT route_name) AS routes FROM vehicles WHERE org_id = %s",
+        (db.org,),
     )
     return {k: int(v or 0) for k, v in row.items()}
 
 
 def list_vehicles(db: Db) -> list[dict]:
-    return db.all("SELECT * FROM vehicles ORDER BY vehicle_no")
+    return db.all("SELECT * FROM vehicles WHERE org_id = %s ORDER BY vehicle_no", (db.org,))
 
 
 def create_vehicle(db: Db, body: VehicleCreate) -> dict:
-    if db.one("SELECT id FROM vehicles WHERE vehicle_no = %s", (body.vehicle_no,)):
+    if db.one("SELECT id FROM vehicles WHERE org_id = %s AND vehicle_no = %s", (db.org, body.vehicle_no)):
         raise Conflict("Vehicle number already exists")
     try:
         vehicle_id = db.execute(
-            "INSERT INTO vehicles (vehicle_no, driver_name, driver_phone, route_name, capacity, status) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
-            (body.vehicle_no, body.driver_name, body.driver_phone,
+            "INSERT INTO vehicles (org_id, vehicle_no, driver_name, driver_phone, route_name, capacity, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (db.org, body.vehicle_no, body.driver_name, body.driver_phone,
              body.route_name, body.capacity, body.status),
         ).lastrowid
     except DuplicateKey:
@@ -35,7 +36,7 @@ def create_vehicle(db: Db, body: VehicleCreate) -> dict:
 
 def update_vehicle(db: Db, vehicle_id: int, body: VehicleUpdate) -> dict:
     with db.transaction():
-        current = db.one("SELECT * FROM vehicles WHERE id = %s FOR UPDATE", (vehicle_id,))
+        current = db.one("SELECT * FROM vehicles WHERE id = %s AND org_id = %s FOR UPDATE", (vehicle_id, db.org))
         if not current:
             raise NotFound("Vehicle not found")
         merged = {**current, **body.model_dump(exclude_unset=True)}
@@ -52,6 +53,6 @@ def update_vehicle(db: Db, vehicle_id: int, body: VehicleUpdate) -> dict:
 
 
 def delete_vehicle(db: Db, vehicle_id: int) -> dict:
-    if db.execute("DELETE FROM vehicles WHERE id = %s", (vehicle_id,)).rowcount == 0:
+    if db.execute("DELETE FROM vehicles WHERE id = %s AND org_id = %s", (vehicle_id, db.org)).rowcount == 0:
         raise NotFound("Vehicle not found")
     return {"deleted": vehicle_id}

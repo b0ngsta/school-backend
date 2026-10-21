@@ -225,5 +225,6 @@ def manager_ids(db: Db, exclude: int | None = None) -> list[int]:
     from app.core.roles import MANAGERS
 
     placeholders = ",".join(["%s"] * len(MANAGERS))
-    rows = db.all(f"SELECT id FROM users WHERE is_active = 1 AND user_type IN ({placeholders})", MANAGERS)
+    rows = db.all(f"SELECT id FROM users WHERE org_id = %s AND is_active = 1 AND user_type IN ({placeholders})",
+                  (db.org, *MANAGERS))
     return [r["id"] for r in rows if r["id"] != exclude]

@@ -8,6 +8,11 @@ Tokens
 * Refresh token: long-lived, single-use, rotated on every refresh (see
   services/sessions.py). It is what keeps an app logged in after hours or
   days in the background.
+
+Organisations: a login names the school (`org_code`; DEFAULT_ORG_CODE when
+left out) and the username is looked up in that school only. Every
+authenticated request is then bound to the user's organisation (and refused
+if the school was disabled).
 """
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ from app.core.context import client_ip
 from app.core.errors import BadRequest, Forbidden, Unauthorized
 from app.db import Db
 from app.models.auth import CurrentUser, TokenResponse
-from app.services import audit, login_throttle, notifications, sessions
+from app.services import audit, login_throttle, notifications, organisations, sessions
 
 INVALID_CREDENTIALS = "Invalid username or password"
 INVALID_TOKEN = "Invalid or expired token"
@@ -33,6 +38,7 @@ def token_response(user: dict, session: sessions.IssuedSession) -> TokenResponse
         role=user["user_type"],
         session_id=session.session_id,
         token_version=user["token_version"],
+        org_id=user["org_id"],
     )
     return TokenResponse(
         access_token=access_token,
@@ -43,19 +49,23 @@ def token_response(user: dict, session: sessions.IssuedSession) -> TokenResponse
         refresh_token=session.refresh_token,
         refresh_expires_in=session.refresh_expires_in,
         must_change_password=bool(user["must_change_password"]),
+        org_id=user["org_id"],
+        org_code=user["org_code"],
+        org_name=user["org_name"],
     )
 
 
 # ------------------------------------------------------------------ login
 
-def login(db: Db, username: str, password: str) -> TokenResponse:
-    key, ip = login_throttle.account_key(username), client_ip()
+def login(db: Db, username: str, password: str, org_code: str | None = None) -> TokenResponse:
+    org = organisations.resolve(db, org_code)
+    key, ip = login_throttle.account_key(org["id"], username), client_ip()
     login_throttle.ensure_allowed(db, key, ip)
 
     user = db.one(
-        "SELECT id, password_hash, full_name, user_type, is_active, token_version, must_change_password "
-        "FROM users WHERE username = %s",
-        (username,),
+        "SELECT id, password_hash, full_name, user_type, is_active, token_version, must_change_password, org_id "
+        "FROM users WHERE org_id = %s AND username = %s",
+        (org["id"], username),
     )
     if user is None:
         security.burn_password_check(password)
@@ -75,7 +85,7 @@ def login(db: Db, username: str, password: str) -> TokenResponse:
                        (security.hash_password(password), user["id"]))
         login_throttle.record(db, key, ip, success=True)
         session = sessions.open_session(db, user["id"])
-    return token_response(user, session)
+    return token_response({**user, "org_code": org["code"], "org_name": org["name"]}, session)
 
 
 def _record_failure(db: Db, key: str, ip: str | None) -> None:
@@ -97,20 +107,26 @@ def authenticate(db: Db, token: str) -> CurrentUser:
 
     row = db.one(
         "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.user_type, u.is_active, "
-        "u.token_version, u.must_change_password, s.id AS session_id, s.revoked_at "
-        "FROM users u LEFT JOIN auth_sessions s ON s.id = %s AND s.user_id = u.id "
+        "u.token_version, u.must_change_password, s.id AS session_id, s.revoked_at, "
+        "u.org_id, o.code AS org_code, o.name AS org_name, o.is_active AS org_active "
+        "FROM users u JOIN organisations o ON o.id = u.org_id "
+        "LEFT JOIN auth_sessions s ON s.id = %s AND s.user_id = u.id "
         "WHERE u.id = %s",
         (claims.session_id, claims.user_id),
     )
     if not row or not row["is_active"]:
         raise Unauthorized("User not found or inactive")
+    if not row["org_active"]:
+        raise Unauthorized(organisations.DISABLED)
     if (
         row["token_version"] != claims.token_version
         or row["session_id"] is None
         or row["revoked_at"] is not None
+        or (claims.org_id is not None and claims.org_id != row["org_id"])
     ):
         raise Unauthorized(INVALID_TOKEN)
 
+    db.bind_org(row["org_id"])
     return CurrentUser(
         id=row["id"],
         username=row["username"],
@@ -121,6 +137,9 @@ def authenticate(db: Db, token: str) -> CurrentUser:
         is_active=row["is_active"],
         session_id=row["session_id"],
         must_change_password=bool(row["must_change_password"]),
+        org_id=row["org_id"],
+        org_code=row["org_code"],
+        org_name=row["org_name"],
     )
 
 
@@ -156,7 +175,7 @@ def logout_everywhere(db: Db, user: CurrentUser) -> None:
 def change_password(db: Db, user: CurrentUser, current_password: str, new_password: str) -> TokenResponse:
     """Change the caller's password, sign out every other device and return
     fresh tokens for this one."""
-    key, ip = login_throttle.account_key(user.username), client_ip()
+    key, ip = login_throttle.account_key(user.org_id, user.username), client_ip()
     login_throttle.ensure_allowed(db, key, ip)
 
     row = db.one("SELECT password_hash FROM users WHERE id = %s", (user.id,))
@@ -171,10 +190,7 @@ def change_password(db: Db, user: CurrentUser, current_password: str, new_passwo
         set_password(db, user.id, new_password, reason="password_changed")
         audit.record(db, user, "auth.password_changed", "user", user.id)
         session = sessions.open_session(db, user.id)
-        fresh = db.one(
-            "SELECT id, full_name, user_type, token_version, must_change_password FROM users WHERE id = %s",
-            (user.id,),
-        )
+        fresh = db.one(sessions.TOKEN_USER_SQL, (user.id,))
     return token_response(fresh, session)
 
 

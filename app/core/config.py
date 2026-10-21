@@ -95,6 +95,10 @@ class Settings:
     firebase_credentials: str     # service-account JSON (a file path or the JSON itself); "" = no push
     jobs_secret: str              # X-Jobs-Secret for POST /internal/jobs/*; "" = jobs endpoint off
 
+    # organisations (schools)
+    default_org_code: str         # school used when a login/reset request names none; "" = code required
+    platform_secret: str          # X-Platform-Secret for /platform/*; "" = platform endpoints off
+
     @property
     def is_production(self) -> bool:
         return self.env == "production"
@@ -152,6 +156,11 @@ def load_settings() -> Settings:
     if env == "production" and "*" in cors:
         log.warning("CORS_ORIGINS contains '*' in production; any website can call this API.")
 
+    platform_secret = env_str("PLATFORM_SECRET", "")
+    if env == "production" and platform_secret and len(platform_secret) < 32:
+        log.warning("PLATFORM_SECRET is shorter than 32 characters; anyone guessing it controls every school. "
+                    "Generate one with `openssl rand -hex 32`.")
+
     return Settings(
         env=env,
         secret_key=secret_key,
@@ -206,6 +215,8 @@ def load_settings() -> Settings:
         enable_docs=env_bool("ENABLE_DOCS", env == "development"),
         firebase_credentials=env_str("FIREBASE_CREDENTIALS", ""),
         jobs_secret=env_str("JOBS_SECRET", ""),
+        default_org_code=env_str("DEFAULT_ORG_CODE", "DEFAULT").strip().upper(),
+        platform_secret=platform_secret,
     )
 
 

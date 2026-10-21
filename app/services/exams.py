@@ -26,9 +26,9 @@ EXAM_STATUS = (
 def get_exam(db: Db, exam_id: int, *, lock: bool = False) -> dict:
     exam = db.one(
         f"SELECT e.*, c.name AS class_name, {EXAM_STATUS} AS status "
-        "FROM exams e LEFT JOIN classes c ON c.id = e.class_id WHERE e.id = %s"
+        "FROM exams e LEFT JOIN classes c ON c.id = e.class_id WHERE e.id = %s AND e.org_id = %s"
         + (" FOR UPDATE" if lock else ""),
-        (exam_id,),
+        (exam_id, db.org),
     )
     if not exam:
         raise NotFound("Exam not found")
@@ -47,7 +47,8 @@ def stats(db: Db) -> dict:
         f"SUM({EXAM_STATUS} = 'completed') AS completed, "
         f"SUM(e.results_published = 1) AS results_published, "
         f"COUNT(*) AS total "
-        f"FROM exams e"
+        f"FROM exams e WHERE e.org_id = %s",
+        (db.org,),
     )
     return {k: int(v or 0) for k, v in row.items()}
 
@@ -57,16 +58,18 @@ def list_exams(db: Db) -> list[dict]:
         f"SELECT e.*, c.name AS class_name, {EXAM_STATUS} AS status, "
         "(SELECT COUNT(*) FROM exam_papers p WHERE p.exam_id = e.id) AS paper_count "
         "FROM exams e LEFT JOIN classes c ON c.id = e.class_id "
-        "ORDER BY e.start_date DESC"
+        "WHERE e.org_id = %s ORDER BY e.start_date DESC",
+        (db.org,),
     )
 
 
 def create_exam(db: Db, body: ExamCreate) -> dict:
-    if body.class_id is not None and not db.one("SELECT id FROM classes WHERE id = %s", (body.class_id,)):
+    if body.class_id is not None and not db.one("SELECT id FROM classes WHERE id = %s AND org_id = %s",
+                                                (body.class_id, db.org)):
         raise NotFound("Class not found")
     exam_id = db.execute(
-        "INSERT INTO exams (name, class_id, start_date, end_date) VALUES (%s, %s, %s, %s)",
-        (body.name, body.class_id, body.start_date, body.end_date),
+        "INSERT INTO exams (org_id, name, class_id, start_date, end_date) VALUES (%s, %s, %s, %s, %s)",
+        (db.org, body.name, body.class_id, body.start_date, body.end_date),
     ).lastrowid
     return {"id": exam_id}
 
@@ -75,8 +78,8 @@ def exam_detail(db: Db, exam_id: int) -> dict:
     """Exam info + the classes it applies to (each with subjects, paper and
     section counts) + sections for the results flow."""
     exam = get_exam(db, exam_id)
-    class_filter = "" if exam["class_id"] is None else "WHERE c.id = %s"
-    params = () if exam["class_id"] is None else (exam["class_id"],)
+    class_filter = "WHERE c.org_id = %s" + ("" if exam["class_id"] is None else " AND c.id = %s")
+    params = (db.org,) if exam["class_id"] is None else (db.org, exam["class_id"])
     exam["classes"] = db.all(
         "SELECT c.id, c.name, "
         "(SELECT COUNT(*) FROM class_subjects cs WHERE cs.class_id = c.id) AS subject_count, "
@@ -85,7 +88,7 @@ def exam_detail(db: Db, exam_id: int) -> dict:
         f"FROM classes c {class_filter} ORDER BY c.name",
         (exam_id, *params),
     )
-    section_filter = "" if exam["class_id"] is None else "WHERE s.class_id = %s"
+    section_filter = "WHERE s.org_id = %s" + ("" if exam["class_id"] is None else " AND s.class_id = %s")
     exam["sections"] = db.all(
         "SELECT s.id, s.name, s.class_id, c.name AS class_name, "
         "(SELECT COUNT(*) FROM student_profiles sp WHERE sp.section_id = s.id) AS student_count "
@@ -116,7 +119,7 @@ def update_exam(db: Db, actor: CurrentUser, exam_id: int, body: ExamUpdate) -> d
 
 def delete_exam(db: Db, actor: CurrentUser, exam_id: int) -> dict:
     with db.transaction():
-        exam = db.one("SELECT paper_path FROM exams WHERE id = %s FOR UPDATE", (exam_id,))
+        exam = db.one("SELECT paper_path FROM exams WHERE id = %s AND org_id = %s FOR UPDATE", (exam_id, db.org))
         if not exam:
             raise NotFound("Exam not found")
         subject_papers = [r["paper_path"] for r in
@@ -135,7 +138,7 @@ def class_papers(db: Db, exam_id: int, class_id: int) -> dict:
     exam = get_exam(db, exam_id)
     if not _applies_to_class(exam, class_id):
         raise NotFound("Class not in this exam")
-    cls = db.one("SELECT id, name FROM classes WHERE id = %s", (class_id,))
+    cls = db.one("SELECT id, name FROM classes WHERE id = %s AND org_id = %s", (class_id, db.org))
     if not cls:
         raise NotFound("Class not found")
     subjects = [r["name"] for r in
@@ -169,7 +172,7 @@ def upload_subject_paper(db: Db, actor: CurrentUser, exam_id: int, class_id: int
         exam = get_exam(db, exam_id)
         if not _applies_to_class(exam, class_id):
             raise NotFound("Class not in this exam")
-        if not db.one("SELECT id FROM classes WHERE id = %s", (class_id,)):
+        if not db.one("SELECT id FROM classes WHERE id = %s AND org_id = %s", (class_id, db.org)):
             raise NotFound("Class not found")
         stored = storage.save_upload(db, file, "papers", storage.PDF_TYPES, max_mb=15)
         old = db.one(
@@ -197,7 +200,8 @@ def upload_subject_paper(db: Db, actor: CurrentUser, exam_id: int, class_id: int
 
 
 def subject_paper_file(db: Db, exam_id: int, paper_id: int) -> FileResponse:
-    paper = db.one("SELECT * FROM exam_papers WHERE id = %s AND exam_id = %s", (paper_id, exam_id))
+    paper = db.one("SELECT p.* FROM exam_papers p JOIN exams e ON e.id = p.exam_id "
+                   "WHERE p.id = %s AND p.exam_id = %s AND e.org_id = %s", (paper_id, exam_id, db.org))
     if not paper:
         raise NotFound("Paper not found")
     return storage.file_response(paper["paper_path"], media_type="application/pdf",
@@ -206,8 +210,9 @@ def subject_paper_file(db: Db, exam_id: int, paper_id: int) -> FileResponse:
 
 def delete_subject_paper(db: Db, actor: CurrentUser, exam_id: int, paper_id: int) -> dict:
     with db.transaction():
-        paper = db.one("SELECT paper_path FROM exam_papers WHERE id = %s AND exam_id = %s FOR UPDATE",
-                       (paper_id, exam_id))
+        paper = db.one("SELECT p.paper_path FROM exam_papers p JOIN exams e ON e.id = p.exam_id "
+                       "WHERE p.id = %s AND p.exam_id = %s AND e.org_id = %s FOR UPDATE",
+                       (paper_id, exam_id, db.org))
         if not paper:
             raise NotFound("Paper not found")
         db.execute("DELETE FROM exam_papers WHERE id = %s", (paper_id,))
@@ -240,7 +245,7 @@ def legacy_paper_file(db: Db, exam_id: int) -> FileResponse:
 # ---------- results ----------
 
 def _section_in_exam(db: Db, exam: dict, section_id: int) -> dict:
-    section = db.one("SELECT id, class_id FROM sections WHERE id = %s", (section_id,))
+    section = db.one("SELECT id, class_id FROM sections WHERE id = %s AND org_id = %s", (section_id, db.org))
     if not section or not _applies_to_class(exam, section["class_id"]):
         raise NotFound("Section not in this exam's class")
     return section

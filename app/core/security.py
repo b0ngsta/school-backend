@@ -88,6 +88,7 @@ class AccessClaims:
     session_id: str
     token_version: int
     role: str
+    org_id: int | None = None  # absent in tokens issued before organisations existed
 
 
 class TokenError(Exception):
@@ -96,7 +97,8 @@ class TokenError(Exception):
         self.expired = expired
 
 
-def create_access_token(*, user_id: int, role: str, session_id: str, token_version: int) -> tuple[str, int]:
+def create_access_token(*, user_id: int, role: str, session_id: str, token_version: int,
+                        org_id: int | None = None) -> tuple[str, int]:
     """Returns (token, lifetime_seconds)."""
     lifetime = settings.access_token_minutes * 60
     now = int(time.time())
@@ -108,6 +110,7 @@ def create_access_token(*, user_id: int, role: str, session_id: str, token_versi
         "sid": session_id,
         "ver": token_version,
         "role": role,
+        "org": org_id,
         "iat": now,
         "exp": now + lifetime,
     }
@@ -137,6 +140,7 @@ def decode_access_token(token: str) -> AccessClaims:
             session_id=str(payload["sid"]),
             token_version=int(payload["ver"]),
             role=str(payload.get("role", "")),
+            org_id=int(payload["org"]) if payload.get("org") is not None else None,
         )
     except (TypeError, ValueError) as exc:
         raise TokenError() from exc

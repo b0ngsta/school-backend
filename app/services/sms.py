@@ -27,15 +27,15 @@ def _resolve_recipients(db: Db, group: str) -> tuple[str, list[str]]:
         return "All Parents", _phones(db.all(
             "SELECT COALESCE(sp.guardian_phone, u.phone) AS phone "
             "FROM users u LEFT JOIN student_profiles sp ON sp.user_id = u.id "
-            "WHERE u.user_type = 'student' AND u.is_active = 1"
+            "WHERE u.org_id = %s AND u.user_type = 'student' AND u.is_active = 1", (db.org,)
         ))
     if group == "all_teachers":
         return "All Teachers", _phones(db.all(
-            "SELECT phone FROM users WHERE user_type = 'teacher' AND is_active = 1"
+            "SELECT phone FROM users WHERE org_id = %s AND user_type = 'teacher' AND is_active = 1", (db.org,)
         ))
     if group == "all_staff":
         return "All Staff", _phones(db.all(
-            "SELECT phone FROM users WHERE user_type != 'student' AND is_active = 1"
+            "SELECT phone FROM users WHERE org_id = %s AND user_type != 'student' AND is_active = 1", (db.org,)
         ))
     if group.startswith("section:"):
         raw_id = group.split(":", 1)[1].strip()
@@ -44,8 +44,8 @@ def _resolve_recipients(db: Db, group: str) -> tuple[str, list[str]]:
         section_id = int(raw_id)
         sec = db.one(
             "SELECT c.name AS class_name, s.name AS section_name FROM sections s "
-            "JOIN classes c ON c.id = s.class_id WHERE s.id = %s",
-            (section_id,),
+            "JOIN classes c ON c.id = s.class_id WHERE s.id = %s AND s.org_id = %s",
+            (section_id, db.org),
         )
         if not sec:
             raise NotFound("Section not found")
@@ -63,8 +63,9 @@ def history(db: Db, page: pagination.Page | None = None) -> pagination.PageResul
     """Latest 100 by default (as before); pages reach the full history."""
     return pagination.fetch(
         db,
-        "SELECT m.*, u.full_name AS sent_by FROM sms_messages m JOIN users u ON u.id = m.created_by",
-        (),
+        "SELECT m.*, u.full_name AS sent_by FROM sms_messages m JOIN users u ON u.id = m.created_by "
+        "WHERE m.org_id = %s",
+        (db.org,),
         "m.created_at DESC, m.id DESC",
         page,
         default_limit=100,
@@ -77,8 +78,8 @@ def send(db: Db, actor: CurrentUser, body: SmsCreate) -> dict:
     status = "sent" if ok else "failed"
     message_id = db.execute(
         "INSERT INTO sms_messages "
-        "(recipient_group, template, message, recipients_count, status, created_by) "
-        "VALUES (%s, %s, %s, %s, %s, %s)",
-        (label, body.template, body.message, len(numbers), status, actor.id),
+        "(org_id, recipient_group, template, message, recipients_count, status, created_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (db.org, label, body.template, body.message, len(numbers), status, actor.id),
     ).lastrowid
     return {"id": message_id, "recipients": len(numbers), "status": status}

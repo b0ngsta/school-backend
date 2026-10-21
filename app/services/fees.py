@@ -48,7 +48,8 @@ def stats(db: Db) -> dict:
         f"COALESCE(SUM(CASE WHEN {EFFECTIVE_STATUS}='pending' THEN f.amount END), 0) AS pending, "
         f"COALESCE(SUM(CASE WHEN {EFFECTIVE_STATUS}='overdue' THEN f.amount END), 0) AS overdue, "
         f"COALESCE(SUM(f.amount), 0) AS total "
-        f"FROM fees f"
+        f"FROM fees f WHERE f.org_id = %s",
+        (db.org,),
     )
     total, collected = float(row["total"]), float(row["collected"])
     return {
@@ -74,9 +75,9 @@ def pending_students(db: Db, page: pagination.Page | None = None) -> pagination.
         f"LEFT JOIN student_profiles sp ON sp.user_id = u.id "
         f"LEFT JOIN classes c ON c.id = sp.class_id "
         f"LEFT JOIN sections s ON s.id = sp.section_id "
-        f"WHERE f.status = 'pending' "
+        f"WHERE f.org_id = %s AND f.status = 'pending' "
         f"GROUP BY u.id, u.full_name, u.photo_path, sp.roll_no, c.name, s.name",
-        (),
+        (db.org,),
         "overdue_total DESC, pending_total DESC, student_id",
         page,
     )
@@ -88,7 +89,8 @@ def generate_class_fees(db: Db, actor: CurrentUser, body: FeeGenerate) -> dict:
     students who don't have it yet."""
     with db.transaction():
         # the row lock serialises concurrent generate calls for the same class
-        cls = db.one("SELECT fee_amount FROM classes WHERE id = %s FOR UPDATE", (body.class_id,))
+        cls = db.one("SELECT fee_amount FROM classes WHERE id = %s AND org_id = %s FOR UPDATE",
+                     (body.class_id, db.org))
         if not cls:
             raise NotFound("Class not found")
         if not cls["fee_amount"]:
@@ -106,13 +108,13 @@ def generate_class_fees(db: Db, actor: CurrentUser, body: FeeGenerate) -> dict:
             (body.class_id, body.title),
         )]
         created = db.execute(
-            "INSERT INTO fees (student_id, title, amount, due_date) "
-            "SELECT sp.user_id, %s, %s, %s FROM student_profiles sp "
+            "INSERT INTO fees (org_id, student_id, title, amount, due_date) "
+            "SELECT %s, sp.user_id, %s, %s, %s FROM student_profiles sp "
             "JOIN users u ON u.id = sp.user_id "
             "WHERE sp.class_id = %s AND u.is_active = 1 "
             "AND NOT EXISTS (SELECT 1 FROM fees f WHERE f.student_id = sp.user_id AND f.title = %s) "
             "ORDER BY sp.user_id",
-            (body.title, cls["fee_amount"], body.due_date, body.class_id, body.title),
+            (db.org, body.title, cls["fee_amount"], body.due_date, body.class_id, body.title),
         ).rowcount
         if created:
             audit.record(db, actor, "fee.generate", "class", body.class_id,
@@ -132,25 +134,25 @@ def list_fees(db: Db, status_filter: str | None, student_id: int | None,
         "LEFT JOIN classes c ON c.id = sp.class_id "
         "LEFT JOIN sections s ON s.id = sp.section_id"
     )
-    where, params = [], []
+    where, params = ["f.org_id = %s"], [db.org]
     if student_id is not None:
         where.append("f.student_id = %s")
         params.append(student_id)
     if status_filter:
         where.append(f"({EFFECTIVE_STATUS}) = %s")
         params.append(status_filter)
-    if where:
-        sql += " WHERE " + " AND ".join(where)
+    sql += " WHERE " + " AND ".join(where)
     return pagination.fetch(db, sql, params, "f.created_at DESC, f.id DESC", page)
 
 
 def create_fee(db: Db, actor: CurrentUser, body: FeeCreate) -> dict:
     with db.transaction():
-        if not db.one("SELECT id FROM users WHERE id = %s AND user_type = 'student'", (body.student_id,)):
+        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'student'",
+                      (body.student_id, db.org)):
             raise NotFound("Student not found")
         fee_id = db.execute(
-            "INSERT INTO fees (student_id, title, amount, due_date) VALUES (%s, %s, %s, %s)",
-            (body.student_id, body.title, body.amount, body.due_date),
+            "INSERT INTO fees (org_id, student_id, title, amount, due_date) VALUES (%s, %s, %s, %s, %s)",
+            (db.org, body.student_id, body.title, body.amount, body.due_date),
         ).lastrowid
         audit.record(db, actor, "fee.create", "fee", fee_id, body.model_dump())
         _notify_new_fee(db, [body.student_id], body.title, body.amount, body.due_date)
@@ -180,16 +182,16 @@ def _mark_paid(db: Db, fee: dict, method: str) -> str | None:
         return None
     reference = new_reference()
     db.execute(
-        "INSERT INTO transactions (reference, student_id, fee_id, amount, method, status) "
-        "VALUES (%s, %s, %s, %s, %s, 'success')",
-        (reference, fee["student_id"], fee["id"], fee["amount"], method),
+        "INSERT INTO transactions (org_id, reference, student_id, fee_id, amount, method, status) "
+        "VALUES (%s, %s, %s, %s, %s, %s, 'success')",
+        (fee["org_id"], reference, fee["student_id"], fee["id"], fee["amount"], method),
     )
     return reference
 
 
 def pay_fee(db: Db, actor: CurrentUser, fee_id: int, method: str) -> dict:
     with db.transaction():
-        fee = db.one("SELECT * FROM fees WHERE id = %s FOR UPDATE", (fee_id,))
+        fee = db.one("SELECT * FROM fees WHERE id = %s AND org_id = %s FOR UPDATE", (fee_id, db.org))
         if not fee:
             raise NotFound("Fee not found")
         reference = _mark_paid(db, fee, method) if fee["status"] != "paid" else None
@@ -203,7 +205,7 @@ def pay_fee(db: Db, actor: CurrentUser, fee_id: int, method: str) -> dict:
 
 def delete_fee(db: Db, actor: CurrentUser, fee_id: int) -> dict:
     with db.transaction():
-        fee = db.one("SELECT * FROM fees WHERE id = %s FOR UPDATE", (fee_id,))
+        fee = db.one("SELECT * FROM fees WHERE id = %s AND org_id = %s FOR UPDATE", (fee_id, db.org))
         if not fee:
             raise NotFound("Fee not found")
         db.execute("DELETE FROM fees WHERE id = %s", (fee_id,))
@@ -225,8 +227,8 @@ def submit_claim(
 ) -> dict:
     """Parent (student login) submits a payment-proof screenshot for their fee."""
     with db.transaction():
-        fee = db.one("SELECT * FROM fees WHERE id = %s AND student_id = %s FOR UPDATE",
-                     (fee_id, student.id))
+        fee = db.one("SELECT * FROM fees WHERE id = %s AND student_id = %s AND org_id = %s FOR UPDATE",
+                     (fee_id, student.id, db.org))
         if not fee:
             raise NotFound("Fee not found")
         if fee["status"] == "paid":
@@ -236,9 +238,9 @@ def submit_claim(
         stored = storage.save_upload(db, file, "claims", storage.IMAGE_TYPES, max_mb=10)
         claim_id = db.execute(
             "INSERT INTO fee_claims "
-            "(fee_id, student_id, amount, method, reference_no, note, screenshot_path, screenshot_name) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (fee_id, student.id, fee["amount"], method,
+            "(org_id, fee_id, student_id, amount, method, reference_no, note, screenshot_path, screenshot_name) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (db.org, fee_id, student.id, fee["amount"], method,
              (reference_no or "").strip()[:100] or None,
              (note or "").strip()[:255] or None,
              stored.path, stored.original_name),
@@ -247,7 +249,7 @@ def submit_claim(
 
 
 def my_claims(db: Db, student: CurrentUser, page: pagination.Page | None = None) -> pagination.PageResult:
-    return pagination.fetch(db, CLAIM_SELECT + " WHERE fc.student_id = %s", (student.id,),
+    return pagination.fetch(db, CLAIM_SELECT + " WHERE fc.org_id = %s AND fc.student_id = %s", (db.org, student.id),
                             "fc.created_at DESC, fc.id DESC", page)
 
 
@@ -257,21 +259,22 @@ def claim_stats(db: Db) -> dict:
         "SUM(status='pending') AS pending, "
         "SUM(status='approved') AS approved, "
         "SUM(status='rejected') AS rejected "
-        "FROM fee_claims"
+        "FROM fee_claims WHERE org_id = %s",
+        (db.org,),
     )
     return {k: int(v or 0) for k, v in row.items()}
 
 
 def list_claims(db: Db, status_filter: str | None, page: pagination.Page | None = None) -> pagination.PageResult:
-    sql, params = CLAIM_SELECT, ()
+    sql, params = CLAIM_SELECT + " WHERE fc.org_id = %s", (db.org,)
     if status_filter:
-        sql += " WHERE fc.status = %s"
-        params = (status_filter,)
+        sql += " AND fc.status = %s"
+        params = (db.org, status_filter)
     return pagination.fetch(db, sql, params, "fc.status = 'pending' DESC, fc.created_at DESC, fc.id DESC", page)
 
 
 def _lock_pending_claim(db: Db, claim_id: int) -> dict:
-    claim = db.one("SELECT * FROM fee_claims WHERE id = %s FOR UPDATE", (claim_id,))
+    claim = db.one("SELECT * FROM fee_claims WHERE id = %s AND org_id = %s FOR UPDATE", (claim_id, db.org))
     if not claim:
         raise NotFound("Claim not found")
     if claim["status"] != "pending":

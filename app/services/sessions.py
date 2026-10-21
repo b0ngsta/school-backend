@@ -30,6 +30,13 @@ log = logging.getLogger(__name__)
 
 INVALID_REFRESH = "Invalid or expired refresh token"
 
+# the user columns a token response needs (with the organisation), for one user id
+TOKEN_USER_SQL = (
+    "SELECT u.id, u.full_name, u.user_type, u.is_active, u.token_version, u.must_change_password, "
+    "u.org_id, o.code AS org_code, o.name AS org_name, o.is_active AS org_active "
+    "FROM users u JOIN organisations o ON o.id = u.org_id WHERE u.id = %s"
+)
+
 
 @dataclass(frozen=True)
 class IssuedSession:
@@ -95,13 +102,11 @@ def _rotate_locked(db: Db, row: dict, presented_generation: int) -> tuple[dict, 
         _revoke(db, row["id"], "expired", now)
         return None
 
-    user = db.one(
-        "SELECT id, full_name, user_type, is_active, token_version, must_change_password "
-        "FROM users WHERE id = %s",
-        (row["user_id"],),
-    )
+    user = db.one(TOKEN_USER_SQL, (row["user_id"],))
     if user is None or not user["is_active"]:
         _revoke(db, row["id"], "user_inactive", now)
+        return None
+    if not user["org_active"]:  # the school was disabled; it can be re-enabled, so keep the session
         return None
 
     current = row["generation"]

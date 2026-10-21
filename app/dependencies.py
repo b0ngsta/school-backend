@@ -2,14 +2,16 @@
 the authenticated user and role checks."""
 from __future__ import annotations
 
+import hmac
+import re
 from collections.abc import Iterator
 
-from fastapi import Depends, Query, Request, Response
+from fastapi import Depends, Header, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import settings
 from app.core.context import set_user_id
-from app.core.errors import Forbidden, Unauthorized
+from app.core.errors import Forbidden, NotFound, Unauthorized
 from app.db import Db, pool
 from app.models.auth import CurrentUser
 from app.services import auth as auth_service
@@ -88,3 +90,28 @@ def paged(response: Response, result: PageResult) -> list[dict]:
     if result.total is not None:
         response.headers["X-Total-Count"] = str(result.total)
     return result.rows
+
+
+# who is operating, as sent by the owner portal (an email or a name); kept in the audit log
+_OPERATOR_RE = re.compile(r"^[\w.@+\- ]{1,120}$")
+
+
+def platform_operator(
+    x_platform_secret: str | None = Header(default=None),
+    x_platform_actor: str | None = Header(default=None),
+) -> str | None:
+    """Guard for every /platform/* endpoint (the people who run this API for
+    many schools, e.g. the owner portal in work/dashboard).
+
+    Needs `X-Platform-Secret` equal to PLATFORM_SECRET; without that setting
+    the endpoints do not exist (404). Returns the operator named in
+    `X-Platform-Actor` (or None) so platform actions can be attributed in
+    the audit log."""
+    if not settings.platform_secret:
+        raise NotFound("Not Found")
+    if not x_platform_secret or not hmac.compare_digest(
+        x_platform_secret.encode(), settings.platform_secret.encode()
+    ):
+        raise Forbidden("Invalid platform secret")
+    actor = (x_platform_actor or "").strip()
+    return actor if _OPERATOR_RE.match(actor) else None

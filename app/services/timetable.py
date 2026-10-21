@@ -23,7 +23,8 @@ SLOT_SELECT = (
 
 
 def my_timetable(db: Db, user: CurrentUser) -> list[dict]:
-    return db.all(SLOT_SELECT + " WHERE t.teacher_id = %s ORDER BY t.day, t.period", (user.id,))
+    return db.all(SLOT_SELECT + " WHERE t.org_id = %s AND t.teacher_id = %s ORDER BY t.day, t.period",
+                  (db.org, user.id))
 
 
 def list_timetable(db: Db, user: CurrentUser, teacher_id: int | None) -> list[dict]:
@@ -32,10 +33,10 @@ def list_timetable(db: Db, user: CurrentUser, teacher_id: int | None) -> list[di
         teacher_id = user.id
     elif user.user_type not in MANAGERS:
         raise Forbidden("Not allowed")
-    sql, params = SLOT_SELECT, ()
+    sql, params = SLOT_SELECT + " WHERE t.org_id = %s", (db.org,)
     if teacher_id is not None:
-        sql += " WHERE t.teacher_id = %s"
-        params = (teacher_id,)
+        sql += " AND t.teacher_id = %s"
+        params = (db.org, teacher_id)
     return db.all(sql + " ORDER BY t.day, t.period", params)
 
 
@@ -45,27 +46,28 @@ def upsert_slot(db: Db, body: SlotUpsert) -> dict:
         limit = school_timings.periods_per_day(db)
         if limit is not None and body.period > limit:
             raise Unprocessable(f"The school day has {limit} periods (see school timings)")
-        if not db.one("SELECT id FROM users WHERE id = %s AND user_type = 'teacher'", (body.teacher_id,)):
+        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'teacher'",
+                      (body.teacher_id, db.org)):
             raise NotFound("Teacher not found")
-        if not db.one("SELECT id FROM sections WHERE id = %s AND class_id = %s",
-                      (body.section_id, body.class_id)):
+        if not db.one("SELECT id FROM sections WHERE id = %s AND class_id = %s AND org_id = %s",
+                      (body.section_id, body.class_id, db.org)):
             raise NotFound("Section not in that class")
         subject = (body.subject or "").strip()[:100] or None
         db.execute(
-            "INSERT INTO timetable_slots (teacher_id, day, period, class_id, section_id, subject) "
-            "VALUES (%s, %s, %s, %s, %s, %s) "
+            "INSERT INTO timetable_slots (org_id, teacher_id, day, period, class_id, section_id, subject) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
             "ON DUPLICATE KEY UPDATE class_id = VALUES(class_id), section_id = VALUES(section_id), "
             "subject = VALUES(subject)",
-            (body.teacher_id, body.day, body.period, body.class_id, body.section_id, subject),
+            (db.org, body.teacher_id, body.day, body.period, body.class_id, body.section_id, subject),
         )
         return db.one(
-            SLOT_SELECT + " WHERE t.teacher_id = %s AND t.day = %s AND t.period = %s",
-            (body.teacher_id, body.day, body.period),
+            SLOT_SELECT + " WHERE t.org_id = %s AND t.teacher_id = %s AND t.day = %s AND t.period = %s",
+            (db.org, body.teacher_id, body.day, body.period),
         )
 
 
 def delete_slot(db: Db, slot_id: int) -> dict:
-    if db.execute("DELETE FROM timetable_slots WHERE id = %s", (slot_id,)).rowcount == 0:
+    if db.execute("DELETE FROM timetable_slots WHERE id = %s AND org_id = %s", (slot_id, db.org)).rowcount == 0:
         raise NotFound("Slot not found")
     return {"deleted": slot_id}
 
@@ -86,11 +88,11 @@ def week(db: Db, user: CurrentUser, start: date | None, teacher_id: int | None) 
     saturday = monday + timedelta(days=SCHOOL_DAYS - 1)
 
     holidays = {r["date"]: r["name"] for r in db.all(
-        "SELECT date, name FROM holidays WHERE date BETWEEN %s AND %s", (monday, saturday))}
+        "SELECT date, name FROM holidays WHERE org_id = %s AND date BETWEEN %s AND %s", (db.org, monday, saturday))}
     leaves = db.all(
-        "SELECT from_date, to_date FROM leave_requests WHERE user_id = %s AND status IN ('pending', 'approved') "
-        "AND from_date <= %s AND to_date >= %s",
-        (teacher_id, saturday, monday),
+        "SELECT from_date, to_date FROM leave_requests WHERE org_id = %s AND user_id = %s "
+        "AND status IN ('pending', 'approved') AND from_date <= %s AND to_date >= %s",
+        (db.org, teacher_id, saturday, monday),
     )
     days = []
     for offset in range(SCHOOL_DAYS):
@@ -107,10 +109,10 @@ def week(db: Db, user: CurrentUser, start: date | None, teacher_id: int | None) 
         "FROM substitution_requests r "
         "JOIN classes c ON c.id = r.class_id JOIN sections s ON s.id = r.section_id "
         "JOIN users req ON req.id = r.requester_id JOIN users sub ON sub.id = r.substitute_id "
-        "WHERE (r.substitute_id = %s OR r.requester_id = %s) AND r.date BETWEEN %s AND %s "
+        "WHERE r.org_id = %s AND (r.substitute_id = %s OR r.requester_id = %s) AND r.date BETWEEN %s AND %s "
         "AND r.status IN ('pending', 'accepted') "
         "ORDER BY r.date, r.period, r.status = 'accepted' DESC, r.updated_at DESC, r.id DESC",
-        (teacher_id, teacher_id, monday, saturday),
+        (db.org, teacher_id, teacher_id, monday, saturday),
     )
     substitutions, seen = [], set()
     for r in rows:
@@ -127,5 +129,6 @@ def week(db: Db, user: CurrentUser, start: date | None, teacher_id: int | None) 
             "status": r["status"],
         })
 
-    slots = db.all(SLOT_SELECT + " WHERE t.teacher_id = %s ORDER BY t.day, t.period", (teacher_id,))
+    slots = db.all(SLOT_SELECT + " WHERE t.org_id = %s AND t.teacher_id = %s ORDER BY t.day, t.period",
+                   (db.org, teacher_id))
     return {"start": monday, "end": saturday, "days": days, "slots": slots, "substitutions": substitutions}

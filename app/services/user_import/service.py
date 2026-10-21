@@ -68,8 +68,8 @@ def authorize(db: Db, actor: CurrentUser, user_type: str, class_id: int | None,
     access.ensure_can_edit_students(db, actor, class_id, section_id)
     section = db.one(
         "SELECT s.id AS section_id, s.class_id, c.name AS class_name, s.name AS section_name "
-        "FROM sections s JOIN classes c ON c.id = s.class_id WHERE s.id = %s AND s.class_id = %s",
-        (section_id, class_id),
+        "FROM sections s JOIN classes c ON c.id = s.class_id WHERE s.id = %s AND s.class_id = %s AND s.org_id = %s",
+        (section_id, class_id, db.org),
     )
     if not section:
         raise NotFound("Section not found in that class")
@@ -102,8 +102,8 @@ def export(db: Db, actor: CurrentUser, user_type: str, class_id: int | None,
     """Current users in the import format (password and photo left empty),
     to edit in a spreadsheet and upload again."""
     section = authorize(db, actor, user_type, class_id, section_id)
-    sql = planner.EXISTING_SQL + "WHERE u.user_type = %s"
-    params: list = [user_type]
+    sql = planner.EXISTING_SQL + "WHERE u.org_id = %s AND u.user_type = %s"
+    params: list = [db.org, user_type]
     if section:
         sql += " AND sp.section_id = %s ORDER BY CAST(sp.roll_no AS UNSIGNED), u.full_name, u.id"
         params.append(section["section_id"])

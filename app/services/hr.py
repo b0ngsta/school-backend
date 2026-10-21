@@ -18,22 +18,22 @@ from app.services import audit, notify, pagination, substitutions
 def list_holidays(db: Db, year: int | None) -> list[dict]:
     sql = (
         "SELECT h.*, u.full_name AS created_by_name FROM holidays h "
-        "JOIN users u ON u.id = h.created_by"
+        "JOIN users u ON u.id = h.created_by WHERE h.org_id = %s"
     )
-    params: tuple = ()
+    params: tuple = (db.org,)
     if year:
-        sql += " WHERE YEAR(h.date) = %s"
-        params = (year,)
+        sql += " AND YEAR(h.date) = %s"
+        params = (db.org, year)
     return db.all(sql + " ORDER BY h.date", params)
 
 
 def create_holiday(db: Db, actor: CurrentUser, body: HolidayCreate) -> dict:
-    if db.one("SELECT id FROM holidays WHERE date = %s", (body.date,)):
+    if db.one("SELECT id FROM holidays WHERE org_id = %s AND date = %s", (db.org, body.date)):
         raise Conflict("A holiday already exists on that date")
     try:
         holiday_id = db.execute(
-            "INSERT INTO holidays (date, name, description, created_by) VALUES (%s, %s, %s, %s)",
-            (body.date, body.name, body.description, actor.id),
+            "INSERT INTO holidays (org_id, date, name, description, created_by) VALUES (%s, %s, %s, %s, %s)",
+            (db.org, body.date, body.name, body.description, actor.id),
         ).lastrowid
     except DuplicateKey:
         raise Conflict("A holiday already exists on that date") from None
@@ -41,22 +41,23 @@ def create_holiday(db: Db, actor: CurrentUser, body: HolidayCreate) -> dict:
 
 
 def update_holiday(db: Db, holiday_id: int, body: HolidayCreate) -> dict:
-    if db.one("SELECT id FROM holidays WHERE date = %s AND id != %s", (body.date, holiday_id)):
+    if db.one("SELECT id FROM holidays WHERE org_id = %s AND date = %s AND id != %s",
+              (db.org, body.date, holiday_id)):
         raise Conflict("A holiday already exists on that date")
     try:
         changed = db.execute(
-            "UPDATE holidays SET date=%s, name=%s, description=%s WHERE id=%s",
-            (body.date, body.name, body.description, holiday_id),
+            "UPDATE holidays SET date=%s, name=%s, description=%s WHERE id=%s AND org_id=%s",
+            (body.date, body.name, body.description, holiday_id, db.org),
         ).rowcount
     except DuplicateKey:
         raise Conflict("A holiday already exists on that date") from None
-    if changed == 0 and not db.one("SELECT id FROM holidays WHERE id = %s", (holiday_id,)):
+    if changed == 0 and not db.one("SELECT id FROM holidays WHERE id = %s AND org_id = %s", (holiday_id, db.org)):
         raise NotFound("Holiday not found")
     return {"updated": holiday_id}
 
 
 def delete_holiday(db: Db, holiday_id: int) -> dict:
-    if db.execute("DELETE FROM holidays WHERE id = %s", (holiday_id,)).rowcount == 0:
+    if db.execute("DELETE FROM holidays WHERE id = %s AND org_id = %s", (holiday_id, db.org)).rowcount == 0:
         raise NotFound("Holiday not found")
     return {"deleted": holiday_id}
 
@@ -82,8 +83,8 @@ def request_leave(db: Db, actor: CurrentUser, body: LeaveCreate) -> dict:
         if db.one("SELECT id FROM leave_requests WHERE user_id = %s AND status = 'pending'", (actor.id,)):
             raise Conflict("You already have a pending leave request")
         leave_id = db.execute(
-            "INSERT INTO leave_requests (user_id, from_date, to_date, reason) VALUES (%s, %s, %s, %s)",
-            (actor.id, body.from_date, body.to_date, body.reason),
+            "INSERT INTO leave_requests (org_id, user_id, from_date, to_date, reason) VALUES (%s, %s, %s, %s, %s)",
+            (db.org, actor.id, body.from_date, body.to_date, body.reason),
         ).lastrowid
         requester = {"id": actor.id, "full_name": actor.full_name}
         substitutions.create_many(db, requester, body.substitutions, leave_id)
@@ -95,24 +96,24 @@ def request_leave(db: Db, actor: CurrentUser, body: LeaveCreate) -> dict:
 
 
 def my_leaves(db: Db, actor: CurrentUser, page: pagination.Page | None = None) -> pagination.PageResult:
-    result = pagination.fetch(db, LEAVE_SELECT + " WHERE l.user_id = %s", (actor.id,),
+    result = pagination.fetch(db, LEAVE_SELECT + " WHERE l.org_id = %s AND l.user_id = %s", (db.org, actor.id),
                               "l.created_at DESC, l.id DESC", page)
     substitutions.coverage(db, result.rows)
     return result
 
 
 def list_leaves(db: Db, status_filter: str | None, page: pagination.Page | None = None) -> pagination.PageResult:
-    sql, params = LEAVE_SELECT, ()
+    sql, params = LEAVE_SELECT + " WHERE l.org_id = %s", (db.org,)
     if status_filter:
-        sql += " WHERE l.status = %s"
-        params = (status_filter,)
+        sql += " AND l.status = %s"
+        params = (db.org, status_filter)
     result = pagination.fetch(db, sql, params, "l.status = 'pending' DESC, l.created_at DESC, l.id DESC", page)
     substitutions.coverage(db, result.rows)
     return result
 
 
 def _visible_leave(db: Db, actor: CurrentUser, leave_id: int) -> dict:
-    leave = db.one(LEAVE_SELECT + " WHERE l.id = %s", (leave_id,))
+    leave = db.one(LEAVE_SELECT + " WHERE l.id = %s AND l.org_id = %s", (leave_id, db.org))
     if not leave or (leave["user_id"] != actor.id and actor.user_type not in MANAGERS):
         raise NotFound("Leave request not found")
     return leave
@@ -172,7 +173,7 @@ def delete_leave(db: Db, actor: CurrentUser, leave_id: int) -> None:
 
 def review_leave(db: Db, actor: CurrentUser, leave_id: int, new_status: str, note: str | None) -> dict:
     with db.transaction():
-        leave = db.one("SELECT * FROM leave_requests WHERE id = %s FOR UPDATE", (leave_id,))
+        leave = db.one("SELECT * FROM leave_requests WHERE id = %s AND org_id = %s FOR UPDATE", (leave_id, db.org))
         if not leave:
             raise NotFound("Leave request not found")
         if leave["status"] != "pending":
@@ -202,23 +203,25 @@ def my_salaries(db: Db, actor: CurrentUser) -> list[dict]:
 
 
 def list_salaries(db: Db, user_id: int | None, page: pagination.Page | None = None) -> pagination.PageResult:
-    sql = "SELECT s.*, u.full_name, u.user_type FROM salary_records s JOIN users u ON u.id = s.user_id"
-    params: tuple = ()
+    sql = ("SELECT s.*, u.full_name, u.user_type FROM salary_records s JOIN users u ON u.id = s.user_id "
+           "WHERE s.org_id = %s")
+    params: tuple = (db.org,)
     if user_id is not None:
-        sql += " WHERE s.user_id = %s"
-        params = (user_id,)
+        sql += " AND s.user_id = %s"
+        params = (db.org, user_id)
     return pagination.fetch(db, sql, params, "s.year DESC, s.month DESC, u.full_name, s.id", page)
 
 
 def save_salary(db: Db, actor: CurrentUser, body: SalaryCreate) -> dict:
     with db.transaction():
-        if not db.one("SELECT id FROM users WHERE id = %s AND user_type != 'student'", (body.user_id,)):
+        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type != 'student'",
+                      (body.user_id, db.org)):
             raise NotFound("Staff member not found")
         db.execute(
-            "INSERT INTO salary_records (user_id, month, year, amount, status, note, created_by) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "INSERT INTO salary_records (org_id, user_id, month, year, amount, status, note, created_by) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
             "ON DUPLICATE KEY UPDATE amount = VALUES(amount), status = VALUES(status), note = VALUES(note)",
-            (body.user_id, body.month, body.year, body.amount, body.status, body.note, actor.id),
+            (db.org, body.user_id, body.month, body.year, body.amount, body.status, body.note, actor.id),
         )
         audit.record(db, actor, "salary.save", "user", body.user_id, body.model_dump())
     return {"saved": True}
@@ -226,7 +229,7 @@ def save_salary(db: Db, actor: CurrentUser, body: SalaryCreate) -> dict:
 
 def delete_salary(db: Db, actor: CurrentUser, salary_id: int) -> dict:
     with db.transaction():
-        if db.execute("DELETE FROM salary_records WHERE id = %s", (salary_id,)).rowcount == 0:
+        if db.execute("DELETE FROM salary_records WHERE id = %s AND org_id = %s", (salary_id, db.org)).rowcount == 0:
             raise NotFound("Salary record not found")
         audit.record(db, actor, "salary.delete", "salary_record", salary_id)
     return {"deleted": salary_id}
@@ -272,8 +275,8 @@ def check_in(db: Db, actor: CurrentUser) -> dict:
             db.execute("UPDATE staff_attendance SET in_time = %s WHERE id = %s", (now, row["id"]))
         else:
             try:
-                db.execute("INSERT INTO staff_attendance (user_id, date, in_time) VALUES (%s, %s, %s)",
-                           (actor.id, today, now))
+                db.execute("INSERT INTO staff_attendance (org_id, user_id, date, in_time) VALUES (%s, %s, %s, %s)",
+                           (db.org, actor.id, today, now))
             except DuplicateKey:
                 raise Conflict("Already checked in today") from None
     return {"in_time": now}
@@ -301,8 +304,8 @@ def staff_attendance_by_day(db: Db, day: date | None, page: pagination.Page | No
         db,
         "SELECT a.*, u.full_name, u.user_type, u.photo_path "
         "FROM staff_attendance a JOIN users u ON u.id = a.user_id "
-        "WHERE a.date = %s",
-        (day or school_today(),),
+        "WHERE a.org_id = %s AND a.date = %s",
+        (db.org, day or school_today()),
         "u.full_name, a.id",
         page,
     )

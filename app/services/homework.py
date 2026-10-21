@@ -42,14 +42,14 @@ def _shape(row: dict) -> dict:
 
 
 def _section_class(db: Db, section_id: int) -> int:
-    row = db.one("SELECT class_id FROM sections WHERE id = %s", (section_id,))
+    row = db.one("SELECT class_id FROM sections WHERE id = %s AND org_id = %s", (section_id, db.org))
     if not row:
         raise NotFound("Section not found")
     return row["class_id"]
 
 
 def _get(db: Db, homework_id: int) -> dict:
-    row = db.one(HOMEWORK_SELECT + " WHERE h.id = %s", (homework_id,))
+    row = db.one(HOMEWORK_SELECT + " WHERE h.id = %s AND h.org_id = %s", (homework_id, db.org))
     if not row:
         raise NotFound("Homework not found")
     return _shape(row)
@@ -94,15 +94,14 @@ def list_homework(db: Db, user: CurrentUser, class_id: int | None, section_id: i
         class_id = _section_class(db, section_id)
     if user.user_type not in MANAGERS:
         access.ensure_can_view_section(db, user, class_id, section_id)
-    sql, where, params = HOMEWORK_SELECT, [], []
+    sql, where, params = HOMEWORK_SELECT, ["h.org_id = %s"], [db.org]
     if class_id is not None:
         where.append("h.class_id = %s")
         params.append(class_id)
     if section_id is not None:
         where.append("h.section_id = %s")
         params.append(section_id)
-    if where:
-        sql += " WHERE " + " AND ".join(where)
+    sql += " WHERE " + " AND ".join(where)
     result = pagination.fetch(db, sql, params, "h.created_at DESC, h.id DESC", page)
     return pagination.PageResult([_shape(r) for r in result.rows], result.total)
 
@@ -114,10 +113,10 @@ def create_homework(db: Db, user: CurrentUser, body: ClassHomeworkCreate) -> dic
         access.ensure_can_view_section(db, user, body.class_id, body.section_id)
         _check_due(body.due_date)
         homework_id = db.execute(
-            "INSERT INTO class_homework (class_id, section_id, subject, title, note, due_date, created_by) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (body.class_id, body.section_id, (body.subject or "").strip() or None, body.title.strip(), body.note,
-             body.due_date, user.id),
+            "INSERT INTO class_homework (org_id, class_id, section_id, subject, title, note, due_date, created_by) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (db.org, body.class_id, body.section_id, (body.subject or "").strip() or None, body.title.strip(),
+             body.note, body.due_date, user.id),
         ).lastrowid
         title = f"📚 New homework: {_label(body)}"
         if body.due_date:

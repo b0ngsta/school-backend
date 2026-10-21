@@ -65,9 +65,9 @@ def _photo_path(row: RowPlan, photos: dict[str, storage.StoredFile]) -> str | No
 def _insert_users(db: Db, plan: Plan, rows: list[RowPlan], hashes: dict[int, str],
                   photos: dict[str, storage.StoredFile]) -> None:
     db.execute_many(
-        "INSERT INTO users (username, password_hash, full_name, email, phone, user_type, photo_path, "
-        "must_change_password) VALUES (%s, %s, %s, %s, %s, %s, %s, 1)",
-        [(r.username, hashes[r.number], r.values["full_name"], r.values["email"], r.values.get("phone"),
+        "INSERT INTO users (org_id, username, password_hash, full_name, email, phone, user_type, photo_path, "
+        "must_change_password) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1)",
+        [(db.org, r.username, hashes[r.number], r.values["full_name"], r.values["email"], r.values.get("phone"),
           plan.user_type, _photo_path(r, photos)) for r in rows],
     )
     ids = _ids_by_username(db, [r.username for r in rows])
@@ -79,8 +79,8 @@ def _ids_by_username(db: Db, usernames: list[str]) -> dict[str, int]:
     ids: dict[str, int] = {}
     for i in range(0, len(usernames), 500):
         part = usernames[i:i + 500]
-        for row in db.all(f"SELECT id, username FROM users WHERE username IN ({', '.join(['%s'] * len(part))})",
-                          part):
+        for row in db.all("SELECT id, username FROM users WHERE org_id = %s "
+                          f"AND username IN ({', '.join(['%s'] * len(part))})", [db.org, *part]):
             ids[fold(row["username"])] = row["id"]
     return ids
 
@@ -89,9 +89,9 @@ def _insert_profiles(db: Db, plan: Plan, rows: list[RowPlan], fields: tuple[str,
     if plan.user_type == "student":
         section = plan.section
         db.execute_many(
-            f"INSERT INTO student_profiles (user_id, class_id, section_id, {', '.join(fields)}) "
-            f"VALUES (%s, %s, %s, {', '.join(['%s'] * len(fields))})",
-            [(r.user_id, section["class_id"], section["section_id"], *(r.values.get(f) for f in fields))
+            f"INSERT INTO student_profiles (org_id, user_id, class_id, section_id, {', '.join(fields)}) "
+            f"VALUES (%s, %s, %s, %s, {', '.join(['%s'] * len(fields))})",
+            [(db.org, r.user_id, section["class_id"], section["section_id"], *(r.values.get(f) for f in fields))
              for r in rows],
         )
     else:
@@ -135,12 +135,12 @@ def _upsert_profiles(db: Db, plan: Plan, rows: list[RowPlan], fields: tuple[str,
     if not rows:
         return
     table = "student_profiles" if plan.user_type == "student" else "teacher_profiles"
-    lead = ("user_id", "class_id", "section_id") if plan.user_type == "student" else ("user_id",)
+    lead = ("org_id", "user_id", "class_id", "section_id") if plan.user_type == "student" else ("user_id",)
     columns = (*lead, *fields)
     params = []
     for r in rows:
-        head = (r.user_id, plan.section["class_id"], plan.section["section_id"]) if plan.user_type == "student" \
-            else (r.user_id,)
+        head = (db.org, r.user_id, plan.section["class_id"], plan.section["section_id"]) \
+            if plan.user_type == "student" else (r.user_id,)
         params.append((*head, *(r.final(f, table) for f in fields)))
     db.execute_many(
         f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))}) "

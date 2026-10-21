@@ -1,0 +1,76 @@
+# CLAUDE.md — shelfwatch_sfa_ir_backend (EduManage school API)
+
+Read this first; open other files only when the task needs them.
+
+## The system (4 repos, one product: "EduManage" school management)
+| Repo | What | Stack |
+|---|---|---|
+| `shelfwatch_sfa_ir_backend` (this) | REST API | FastAPI 0.115, PyMySQL (raw SQL), MySQL 8 / TiDB, Alembic |
+| `shelfwatch-plus` | Admin/staff web app (one school) | Vite + React 18 + react-router 6 + Tailwind 3 |
+| `work/ShelfwatchPlus` | Android app, all roles (own CLAUDE.md) | React Native 0.87.1, React 19 (Node ≥22), TypeScript, no nav lib |
+| `work/dashboard` | **EduManage HQ**: owner portal over all schools; the only client of `/platform/*` (own CLAUDE.md) | Next.js 16.4, React 19.3, TypeScript, Tailwind 4 |
+Names say "shelfwatch" but it is a school app, not retail. **Multi-school**: one API serves many schools ("organisations").
+
+## Organisations (multi-school) — read before touching SQL (`docs/ORGANISATIONS.md`)
+- `organisations` (id, code, name, is_active). Login/forgot/verify/reset take `org_code`; missing → `DEFAULT_ORG_CODE` (default `DEFAULT` = the pre-0009 school, org id 1). Usernames unique **per school**.
+- 25 per-school tables carry `org_id INT NOT NULL` (**no default** — an INSERT without it errors): users, classes, sections, teacher_assignments, student_profiles, attendance, fees, fee_claims, transactions, lesson_plans, notices, enquiries, exams, timetable_slots, calendar_events, holidays, leave_requests, salary_records, staff_attendance, vehicles, sms_messages, school_timings (1 row/school), substitution_requests, class_homework, audit_logs (nullable). Child tables reached via a validated parent have none.
+- Unique keys are per school (`uq_users_org_username`, `uq_classes_org_name`, `uq_holidays_org_date`, `uq_vehicles_org_vehicle_no`, `uq_calendar_events_org_title`, `uq_student_org_admission_no`, `uq_users_org_principal`, `uq_school_timings_org`).
+- `get_current_user` → `auth.authenticate` binds the request `Db` to the user's school: **services use `db.org`** (raises if unbound). Rule: every query/insert on a per-school table has `org_id = %s`; every client-supplied id is looked up with the org filter first.
+- JWT has `org` claim; disabled school → 403 login, 401 tokens/refresh. Throttle keys `"<org_id>:<username>"`; reset emails use the school name.
+- New schools: `python -m app.cli create-org CODE "Name"` or `POST /platform/organisations` (`X-Platform-Secret: $PLATFORM_SECRET`; 404 when unset). Public `GET /organisations/{code}` → `{code,name}` for login screens.
+
+## Platform API (owner portal `work/dashboard`) — `routes/platform.py` + `services/platform.py`
+- Guard `dependencies.platform_operator`: `X-Platform-Secret` (hmac compare; 404 if PLATFORM_SECRET unset, 403 if wrong); returns `X-Platform-Actor` (operator email, regex-checked) → stored as `details.operator` in audit entries.
+- Cross-school code **does not use `db.org`**: it filters/groups by `org_id` explicitly; one-school actions `db.bind_org(org_id)` first. Every cross-school number = a fixed number of `GROUP BY org_id` queries (never one query per school).
+- `/platform/overview` (totals + 14-day trends + rows) · `/platform/organisations` GET rows (counts, `attendance_today`, `attendance_14d`, fees, pending, `active_users` from `auth_sessions.last_used_at` (UTC), `alerts`) / POST create · `/platform/organisations/{code}` GET detail / PATCH · `/{code}/users` (paged, `X-Total-Count`) · `/{code}/users/{id}/password` · `/{code}/users/{id}/sign-out` · `/platform/activity` (audit log, `before_id` cursor, action prefix) · `/platform/system`.
+- Times: TIMESTAMP columns come back in school time, auth tables are naive UTC → responses are ISO strings with offset (`_school_iso` / `_utc_iso`). Sign-in counts per school use throttle keys `"<org_id>:%"`.
+- Alert codes: disabled, setup_incomplete, inactive_30d, inactive_7d, attendance_not_marked (Mon–Sat, not a holiday), fees_overdue, fee_claims_waiting.
+
+## Roles (`app/core/roles.py`)
+MANAGERS = admin, principal, sub_admin, coordinator · STAFF = MANAGERS + teacher · NON_STUDENT = STAFF + driver ·
+`student` = parent login (mobile app, `/student/*`). ADMIN_MANAGED (only admin creates/deletes) = admin, principal, sub_admin.
+Seed logins (school code `DEFAULT`): admin/admin123, principal/principal123, subadmin/sub123, coordinator/coord123, driver/driver123 (must_change_password).
+
+## Layout & rules
+- `app/main.py` app factory; `routes/__init__.py` ALL_ROUTERS
+- `routes/` HTTP only (parse, role check, call service) — **no SQL in routes**
+- `services/` business rules + SQL; raise `app.core.errors` (→ `{"detail": ...}`), never touch HTTP objects
+- `models/` Pydantic request models per domain; `db/` pool + request-scoped transactional session
+- `core/` config, security (Argon2id, JWT, rotating refresh tokens), signed file URLs, clock (Asia/Kolkata), logging/Sentry
+- `storage/` local or S3 (R2/OCI); `mail/` SMTP or console; `services/user_import/` CSV + photo-ZIP bulk import
+- `cli.py`: `python -m app.cli set-password|revoke-sessions|list-sessions <user> [--org CODE]`, `check-db|check-data|copy-uploads-to-s3`, `list-orgs|create-org|rename-org|change-org-code|disable-org|enable-org`
+- SQLAlchemy used **only** by Alembic. Migrations: `migrations/versions/0001…0010` (latest `0010_platform_indexes`: `auth_sessions(last_used_at)`, `staff_attendance(date, org_id)`); `legacy/` = old SQL v3–v8
+- Docs: `docs/ORGANISATIONS.md`, `docs/AUTH.md`, `docs/OPERATIONS.md`, `docs/FRONTEND_README.md`, `docs/DPDP.md`; deploy: `DEPLOY.md`, `DEPLOY_ORACLE.md`
+
+## Endpoint map (prefix → domain file in routes/ and services/)
+/auth (login, me, refresh, logout, logout-all, change/forgot/verify/reset password; `org_code`) · /organisations/{code} (public) ·
+/platform/* (overview, organisations list/create/detail/PATCH, users + password/sign-out, activity, system; X-Platform-Secret) · /users (+photo, /teachers) ·
+/classes (+sections, subjects) · /students/{id} (+attendance, homework, remarks, report-cards) · /assignments (+/mine) ·
+/attendance (+stats) · /homework (+submissions; class homework) · /exams (+papers per class, results) ·
+/fees (+generate, pay, claims approve/reject) · /transactions (payments) · /enquiries (reception) · /vehicles (transport) ·
+/notices · /sms · /calendar/events · /dashboard (stats, activities, attendance-week) · /lessons (lesson plans) ·
+hr.py: /holidays, /leaves (+approve/reject), /salaries, /staff-attendance (check-in/out) ·
+/timetable (mine, week, slots) · /substitutions (availability, incoming/outgoing, accept/decline/withdraw/cancel) ·
+/settings/school-timings · /notifications (+unread-count, read) + /devices (FCM tokens) · /imports/users (columns, template, export) ·
+/student/* (parent portal, "me"-scoped) · /internal/jobs/fee-reminders (X-Jobs-Secret; all schools)
+
+## Conventions
+Dates `YYYY-MM-DD`, times 24h `HH:MM` local, weekday Mon=0…Sat=5. Lists: `?limit=&offset=` + `X-Total-Count` header.
+Errors 400/403/404/409/422/429 with `{"detail"}`. Access JWT 15 min (set 1440 for clients without refresh), refresh 30d idle/180d max.
+
+## Run / test
+```
+cp .env.example .env && source venv/bin/activate && pip install -r requirements.txt
+alembic upgrade head && uvicorn app.main:app --reload      # Swagger /docs in dev; local MySQL without TLS: DB_SSL_CA=""
+TEST_DATABASE_URL=mysql+pymysql://root:pass@127.0.0.1:3306/school_test pytest   # real MySQL; 167 tests
+# tests/test_organisations.py: two schools, same names; sweeps every GET endpoint per role + cross-school ids → 404
+# tests/test_platform.py: /platform/* totals, alerts, detail isolation, paging/search, password/sign-out, audit, secret
+ruff check .   # py311, line 120
+```
+Docker: `docker compose up -d --build` (dev), `docker-compose.prod.yml` + Caddy (prod). Image runs migrations on start.
+Deployed instance used by mobile app: https://school-app-docker-v1.onrender.com. Optional: FIREBASE_CREDENTIALS (push), SMTP_* (reset emails), STORAGE_BACKEND=s3,
+DEFAULT_ORG_CODE (school for requests without org_code; "" = code required), PLATFORM_SECRET (enables /platform/*; 32+ chars, same value in work/dashboard; warning in production if shorter).
+Don't read/commit `.env` (real secrets).
+
+## Recent work (git log)
+TiDB connection → CSV import, password reset, optimization → notifications + substitutions → **organisations / multi-school** (uncommitted: migration 0009, `db.org` scoping in every service, org-aware auth/reset/throttle/CLI, platform endpoints, tests) → **platform API for the owner portal** (uncommitted: `routes/platform.py`, `services/platform.py`, `models/platform.py`, `dependencies.platform_operator`, migration 0010, `tests/test_platform.py`; `routes/organisations.py` now only has the public lookup).

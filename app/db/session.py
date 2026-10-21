@@ -10,6 +10,12 @@ autocommit mode; anything that writes more than one row uses
 which commits when the block ends and rolls back if anything raises.
 `on_commit` / `on_rollback` hooks keep files on disk consistent with the
 database (e.g. delete the old photo only after the new path is committed).
+
+Organisations (schools): once the caller is authenticated, the request's Db
+is bound to their organisation (`db.bind_org`, done by get_current_user).
+Services read `db.org` and put `org_id = %s` in every query on a
+per-school table. Reading `db.org` before anything was bound raises, so a
+code path that forgot the binding fails loudly instead of mixing schools.
 """
 from __future__ import annotations
 
@@ -53,6 +59,26 @@ class Db:
         self._depth = 0
         self._on_commit: list[Callable[[], None]] = []
         self._on_rollback: list[Callable[[], None]] = []
+        self._org_id: int | None = None
+
+    # ---------------------------------------------------------- organisation
+
+    def bind_org(self, org_id: int) -> None:
+        """Scope this session to one organisation (school)."""
+        if self._org_id is not None and self._org_id != org_id:
+            raise RuntimeError("This database session already belongs to another organisation")
+        self._org_id = int(org_id)
+
+    @property
+    def org(self) -> int:
+        """The organisation this request works in (see bind_org)."""
+        if self._org_id is None:
+            raise RuntimeError("No organisation bound to this database session")
+        return self._org_id
+
+    @property
+    def has_org(self) -> bool:
+        return self._org_id is not None
 
     # --------------------------------------------------------------- queries
 

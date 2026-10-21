@@ -24,7 +24,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/login", response_model=LoginResponse)
 def login(body: LoginRequest, db: Db = Depends(get_db)):
-    return auth_service.login(db, body.username, body.password)
+    return auth_service.login(db, body.username, body.password, body.org_code)
 
 
 @router.get("/me")
@@ -71,16 +71,17 @@ def change_password(
 
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
 def forgot_password(body: ForgotPasswordRequest, db: Db = Depends(get_db)):
-    """Email a 6-digit reset code. `login` is a username or an email address.
-    The reply is the same whether or not an account matches."""
-    return ForgotPasswordResponse(code_expires_in=password_reset.request_code(db, body.login))
+    """Email a 6-digit reset code. `login` is a username or an email address
+    of the school named by `org_code`. The reply is the same whether or not
+    an account matches."""
+    return ForgotPasswordResponse(code_expires_in=password_reset.request_code(db, body.login, body.org_code))
 
 
 @router.post("/verify-reset-code")
 def verify_reset_code(body: VerifyResetCodeRequest, db: Db = Depends(get_db)):
     """Optional: check the code before asking for the new password. The code
     stays valid; wrong codes count against the attempt limit."""
-    password_reset.verify_code(db, body.login, body.code)
+    password_reset.verify_code(db, body.login, body.code, body.org_code)
     return {"valid": True}
 
 
@@ -88,4 +89,4 @@ def verify_reset_code(body: VerifyResetCodeRequest, db: Db = Depends(get_db)):
 def reset_password(body: ResetPasswordRequest, db: Db = Depends(get_db)):
     """Set a new password with the emailed code. Every device is signed out;
     the response logs this one in."""
-    return password_reset.reset_password(db, body.login, body.code, body.new_password)
+    return password_reset.reset_password(db, body.login, body.code, body.new_password, body.org_code)

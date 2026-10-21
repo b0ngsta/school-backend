@@ -75,14 +75,14 @@ def _can_withdraw(row: dict, times: dict[int, dict]) -> bool:
 
 
 def get_shaped(db: Db, request_id: int, times: dict[int, dict] | None = None) -> dict | None:
-    row = db.one(SUB_SELECT + " WHERE r.id = %s", (request_id,))
+    row = db.one(SUB_SELECT + " WHERE r.id = %s AND r.org_id = %s", (request_id, db.org))
     return _shape(row, period_times(db) if times is None else times) if row else None
 
 
 def for_leave(db: Db, leave_id: int) -> list[dict]:
     times = period_times(db)
-    rows = db.all(SUB_SELECT + " WHERE r.leave_id = %s ORDER BY r.date, r.period, r.created_at DESC, r.id DESC",
-                  (leave_id,))
+    rows = db.all(SUB_SELECT + " WHERE r.org_id = %s AND r.leave_id = %s "
+                  "ORDER BY r.date, r.period, r.created_at DESC, r.id DESC", (db.org, leave_id))
     return [_shape(r, times) for r in rows]
 
 
@@ -109,20 +109,20 @@ def _period_label(row: dict, times: dict[int, dict]) -> str:
 
 def _busy_reason(db: Db, teacher_id: int, day: date, period: int) -> str | None:
     """Why a teacher can't cover `period` on `day` (None = free)."""
-    if db.one("SELECT 1 FROM timetable_slots WHERE teacher_id = %s AND day = %s AND period = %s LIMIT 1",
-              (teacher_id, day.weekday(), period)):
+    if db.one("SELECT 1 FROM timetable_slots WHERE org_id = %s AND teacher_id = %s AND day = %s AND period = %s "
+              "LIMIT 1", (db.org, teacher_id, day.weekday(), period)):
         return "has a class"
-    if db.one("SELECT 1 FROM substitution_requests WHERE substitute_id = %s AND date = %s AND period = %s "
-              "AND status = 'accepted' LIMIT 1", (teacher_id, day, period)):
+    if db.one("SELECT 1 FROM substitution_requests WHERE org_id = %s AND substitute_id = %s AND date = %s "
+              "AND period = %s AND status = 'accepted' LIMIT 1", (db.org, teacher_id, day, period)):
         return "is already covering"
-    if db.one("SELECT 1 FROM leave_requests WHERE user_id = %s AND status IN ('pending', 'approved') "
-              "AND from_date <= %s AND to_date >= %s LIMIT 1", (teacher_id, day, day)):
+    if db.one("SELECT 1 FROM leave_requests WHERE org_id = %s AND user_id = %s AND status IN ('pending', 'approved') "
+              "AND from_date <= %s AND to_date >= %s LIMIT 1", (db.org, teacher_id, day, day)):
         return "is on leave"
     return None
 
 
 def _holiday(db: Db, day: date) -> str | None:
-    return db.scalar("SELECT name FROM holidays WHERE date = %s", (day,))
+    return db.scalar("SELECT name FROM holidays WHERE org_id = %s AND date = %s", (db.org, day))
 
 
 def _lock_users(db: Db, *user_ids: int) -> None:
@@ -140,15 +140,16 @@ def availability(db: Db, user: CurrentUser, from_date: date, to_date: date, leav
         raise BadRequest("'to' must be on or after 'from'")
     if (to_date - from_date).days + 1 > MAX_RANGE_DAYS:
         raise BadRequest(f"Choose at most {MAX_RANGE_DAYS} days at a time")
-    if leave_id is not None and not db.one("SELECT id FROM leave_requests WHERE id = %s AND user_id = %s",
-                                           (leave_id, requester_id)):
+    if leave_id is not None and not db.one("SELECT id FROM leave_requests WHERE id = %s AND user_id = %s "
+                                           "AND org_id = %s", (leave_id, requester_id, db.org)):
         raise NotFound("Leave request not found")
 
     times = period_times(db)
     dates = [from_date + timedelta(days=i) for i in range((to_date - from_date).days + 1)]
     dates = [d for d in dates if d.weekday() != SUNDAY]
     holidays = {r["date"]: r["name"] for r in db.all(
-        "SELECT date, name FROM holidays WHERE date BETWEEN %s AND %s", (from_date, to_date))}
+        "SELECT date, name FROM holidays WHERE org_id = %s AND date BETWEEN %s AND %s",
+        (db.org, from_date, to_date))}
     weekdays = sorted({d.weekday() for d in dates})
 
     my_slots: dict[int, list[dict]] = defaultdict(list)
@@ -156,22 +157,22 @@ def availability(db: Db, user: CurrentUser, from_date: date, to_date: date, leav
         "SELECT t.id, t.day, t.period, t.class_id, t.section_id, t.subject, "
         "c.name AS class_name, s.name AS section_name FROM timetable_slots t "
         "JOIN classes c ON c.id = t.class_id JOIN sections s ON s.id = t.section_id "
-        "WHERE t.teacher_id = %s ORDER BY t.day, t.period",
-        (requester_id,),
+        "WHERE t.org_id = %s AND t.teacher_id = %s ORDER BY t.day, t.period",
+        (db.org, requester_id),
     ):
         my_slots[s["day"]].append(s)
 
     teachers = db.all(
         "SELECT u.id AS teacher_id, u.full_name, u.photo_path, tp.subject FROM users u "
         "LEFT JOIN teacher_profiles tp ON tp.user_id = u.id "
-        "WHERE u.user_type = 'teacher' AND u.is_active = 1 AND u.id != %s",
-        (requester_id,),
+        "WHERE u.org_id = %s AND u.user_type = 'teacher' AND u.is_active = 1 AND u.id != %s",
+        (db.org, requester_id),
     )
     busy_slots: set[tuple[int, int, int]] = set()
     if weekdays:
         busy_slots = {(r["teacher_id"], r["day"], r["period"]) for r in db.all(
-            f"SELECT teacher_id, day, period FROM timetable_slots WHERE day IN ({','.join(['%s'] * len(weekdays))})",
-            weekdays)}
+            "SELECT teacher_id, day, period FROM timetable_slots WHERE org_id = %s "
+            f"AND day IN ({','.join(['%s'] * len(weekdays))})", (db.org, *weekdays))}
 
     week_start = from_date - timedelta(days=from_date.weekday())
     week_end = to_date + timedelta(days=SUNDAY - to_date.weekday())
@@ -179,23 +180,23 @@ def availability(db: Db, user: CurrentUser, from_date: date, to_date: date, leav
     per_week: dict[tuple[int, date], int] = defaultdict(int)
     for r in db.all(
         "SELECT substitute_id, date, period FROM substitution_requests "
-        "WHERE status = 'accepted' AND date BETWEEN %s AND %s",
-        (week_start, week_end),
+        "WHERE org_id = %s AND status = 'accepted' AND date BETWEEN %s AND %s",
+        (db.org, week_start, week_end),
     ):
         covering.add((r["substitute_id"], r["date"], r["period"]))
         per_week[(r["substitute_id"], r["date"] - timedelta(days=r["date"].weekday()))] += 1
 
     on_leave: dict[int, list[tuple[date, date]]] = defaultdict(list)
     for r in db.all(
-        "SELECT user_id, from_date, to_date FROM leave_requests WHERE status IN ('pending', 'approved') "
-        "AND from_date <= %s AND to_date >= %s",
-        (to_date, from_date),
+        "SELECT user_id, from_date, to_date FROM leave_requests WHERE org_id = %s "
+        "AND status IN ('pending', 'approved') AND from_date <= %s AND to_date >= %s",
+        (db.org, to_date, from_date),
     ):
         on_leave[r["user_id"]].append((r["from_date"], r["to_date"]))
 
     requests: dict[tuple[date, int], list[dict]] = defaultdict(list)
-    for r in db.all(SUB_SELECT + " WHERE r.requester_id = %s AND r.date BETWEEN %s AND %s "
-                    "ORDER BY r.created_at DESC, r.id DESC", (requester_id, from_date, to_date)):
+    for r in db.all(SUB_SELECT + " WHERE r.org_id = %s AND r.requester_id = %s AND r.date BETWEEN %s AND %s "
+                    "ORDER BY r.created_at DESC, r.id DESC", (db.org, requester_id, from_date, to_date)):
         requests[(r["date"], r["period"])].append(_shape(r, times))
 
     def free(teacher: dict, d: date, period: int) -> bool:
@@ -254,14 +255,14 @@ def create(db: Db, requester: dict, day: date, period: int, substitute_id: int, 
     slot = db.one(
         "SELECT t.id, t.class_id, t.section_id, t.subject, c.name AS class_name, s.name AS section_name "
         "FROM timetable_slots t JOIN classes c ON c.id = t.class_id JOIN sections s ON s.id = t.section_id "
-        "WHERE t.teacher_id = %s AND t.day = %s AND t.period = %s",
-        (requester["id"], day.weekday(), period),
+        "WHERE t.org_id = %s AND t.teacher_id = %s AND t.day = %s AND t.period = %s",
+        (db.org, requester["id"], day.weekday(), period),
     )
     if not slot:
         raise BadRequest(f"{who} no class in period {period} on {when}")
 
-    substitute = db.one("SELECT id, full_name FROM users WHERE id = %s AND user_type = 'teacher' AND is_active = 1",
-                        (substitute_id,))
+    substitute = db.one("SELECT id, full_name FROM users WHERE id = %s AND org_id = %s AND user_type = 'teacher' "
+                        "AND is_active = 1", (substitute_id, db.org))
     if not substitute:
         raise NotFound("Substitute teacher not found")
     if substitute["id"] == requester["id"]:
@@ -283,7 +284,8 @@ def create(db: Db, requester: dict, day: date, period: int, substitute_id: int, 
         raise Conflict(duplicate)
 
     if leave_id is not None:
-        leave = db.one("SELECT * FROM leave_requests WHERE id = %s AND user_id = %s", (leave_id, requester["id"]))
+        leave = db.one("SELECT * FROM leave_requests WHERE id = %s AND user_id = %s AND org_id = %s",
+                       (leave_id, requester["id"], db.org))
         if not leave:
             raise NotFound("Leave request not found")
         if leave["status"] in ("rejected", "cancelled"):
@@ -293,10 +295,10 @@ def create(db: Db, requester: dict, day: date, period: int, substitute_id: int, 
 
     try:
         request_id = db.execute(
-            "INSERT INTO substitution_requests (leave_id, requester_id, substitute_id, date, period, "
+            "INSERT INTO substitution_requests (org_id, leave_id, requester_id, substitute_id, date, period, "
             "timetable_slot_id, class_id, section_id, subject, note) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (leave_id, requester["id"], substitute["id"], day, period, slot["id"], slot["class_id"],
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (db.org, leave_id, requester["id"], substitute["id"], day, period, slot["id"], slot["class_id"],
              slot["section_id"], slot["subject"], (note or "").strip() or None),
         ).lastrowid
     except DuplicateKey:
@@ -313,8 +315,8 @@ def create(db: Db, requester: dict, day: date, period: int, substitute_id: int, 
 def create_request(db: Db, user: CurrentUser, body) -> dict:
     requester_id = _requester_id(user, body.teacher_id)
     with db.transaction():
-        requester = db.one("SELECT id, full_name FROM users WHERE id = %s AND is_active = 1 AND user_type IN "
-                           f"({','.join(['%s'] * len(STAFF))})", (requester_id, *STAFF))
+        requester = db.one("SELECT id, full_name FROM users WHERE id = %s AND org_id = %s AND is_active = 1 "
+                           f"AND user_type IN ({','.join(['%s'] * len(STAFF))})", (requester_id, db.org, *STAFF))
         if not requester:
             raise NotFound("Teacher not found")
         request_id = create(db, requester, body.date, body.period, body.substitute_id, body.leave_id, body.note,
@@ -337,7 +339,8 @@ def create_many(db: Db, requester: dict, items, leave_id: int) -> None:
 # -------------------------------------------------------------- responses
 
 def _load_for_update(db: Db, request_id: int) -> dict:
-    row = db.one("SELECT * FROM substitution_requests WHERE id = %s FOR UPDATE", (request_id,))
+    row = db.one("SELECT * FROM substitution_requests WHERE id = %s AND org_id = %s FOR UPDATE",
+                 (request_id, db.org))
     if not row:
         raise NotFound("Substitution request not found")
     return row
@@ -360,7 +363,8 @@ def _only_substitute(user: CurrentUser, row: dict) -> None:
 
 
 def accept(db: Db, user: CurrentUser, request_id: int, note: str | None) -> dict:
-    peek = db.one("SELECT requester_id, substitute_id FROM substitution_requests WHERE id = %s", (request_id,))
+    peek = db.one("SELECT requester_id, substitute_id FROM substitution_requests WHERE id = %s AND org_id = %s",
+                  (request_id, db.org))
     if not peek:
         raise NotFound("Substitution request not found")
     taken_by = None
@@ -510,9 +514,9 @@ def cancel_for_leave(db: Db, leave_id: int, keep_from: date | None = None, keep_
 def link_standalone(db: Db, requester_id: int, leave_id: int, from_date: date, to_date: date) -> None:
     """Requests sent before the leave existed (leave_id NULL) belong to it now."""
     db.execute(
-        "UPDATE substitution_requests SET leave_id = %s WHERE requester_id = %s AND leave_id IS NULL "
+        "UPDATE substitution_requests SET leave_id = %s WHERE org_id = %s AND requester_id = %s AND leave_id IS NULL "
         "AND status IN ('pending', 'accepted') AND date BETWEEN %s AND %s",
-        (leave_id, requester_id, from_date, to_date),
+        (leave_id, db.org, requester_id, from_date, to_date),
     )
 
 
@@ -529,7 +533,9 @@ def _list(db: Db, where: list[str], params: list, status: str | None, from_date:
     if to_date:
         where.append("r.date <= %s")
         params.append(to_date)
-    sql = SUB_SELECT + (" WHERE " + " AND ".join(where) if where else "")
+    where.insert(0, "r.org_id = %s")
+    params.insert(0, db.org)
+    sql = SUB_SELECT + " WHERE " + " AND ".join(where)
     result = pagination.fetch(db, sql, params, "r.date DESC, r.period ASC, r.id DESC", page)
     times = period_times(db)
     return pagination.PageResult([_shape(r, times) for r in result.rows], result.total)
@@ -574,10 +580,11 @@ def coverage(db: Db, leaves: list[dict]) -> None:
     first, last = min(lv["from_date"] for lv in leaves), max(lv["to_date"] for lv in leaves)
     users_sql = ",".join(["%s"] * len(user_ids))
     slots: dict[int, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
-    for s in db.all(f"SELECT teacher_id, day, period FROM timetable_slots WHERE teacher_id IN ({users_sql})",
-                    user_ids):
+    for s in db.all(f"SELECT teacher_id, day, period FROM timetable_slots WHERE org_id = %s "
+                    f"AND teacher_id IN ({users_sql})", (db.org, *user_ids)):
         slots[s["teacher_id"]][s["day"]].add(s["period"])
-    holidays = {r["date"] for r in db.all("SELECT date FROM holidays WHERE date BETWEEN %s AND %s", (first, last))}
+    holidays = {r["date"] for r in db.all("SELECT date FROM holidays WHERE org_id = %s AND date BETWEEN %s AND %s",
+                                          (db.org, first, last))}
     state: dict[tuple[int, date, int], str] = {}
     for r in db.all(
         f"SELECT requester_id, date, period, status FROM substitution_requests WHERE requester_id IN ({users_sql}) "

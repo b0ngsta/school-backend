@@ -42,9 +42,9 @@ def create_lesson_plan(
             raise Forbidden("You are not assigned to this class/section")
         plan_id = db.execute(
             "INSERT INTO lesson_plans "
-            "(teacher_id, class_id, section_id, heading, duration_start, duration_end, final_remark) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (teacher.id, class_id, section_id, heading, start, end, final_remark),
+            "(org_id, teacher_id, class_id, section_id, heading, duration_start, duration_end, final_remark) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (db.org, teacher.id, class_id, section_id, heading, start, end, final_remark),
         ).lastrowid
         saved = []
         for upload in files:
@@ -64,7 +64,7 @@ def create_lesson_plan(
 def list_lesson_plans(db: Db, user: CurrentUser, teacher_id: int | None, class_id: int | None,
                       page: pagination.Page | None = None) -> pagination.PageResult:
     """Managers see all (filterable); teachers see their own."""
-    where, params = [], []
+    where, params = ["lp.org_id = %s"], [db.org]
     if user.user_type == "teacher":
         where.append("lp.teacher_id = %s")
         params.append(user.id)
@@ -82,8 +82,7 @@ def list_lesson_plans(db: Db, user: CurrentUser, teacher_id: int | None, class_i
         "JOIN classes c ON c.id = lp.class_id "
         "LEFT JOIN sections s ON s.id = lp.section_id"
     )
-    if where:
-        sql += " WHERE " + " AND ".join(where)
+    sql += " WHERE " + " AND ".join(where)
     result = pagination.fetch(db, sql, params, "lp.created_at DESC, lp.id DESC", page)
     plans = result.rows
 
@@ -103,7 +102,8 @@ def list_lesson_plans(db: Db, user: CurrentUser, teacher_id: int | None, class_i
 
 
 def download_lesson_file(db: Db, file_id: int) -> FileResponse:
-    f = db.one("SELECT * FROM lesson_files WHERE id = %s", (file_id,))
+    f = db.one("SELECT f.* FROM lesson_files f JOIN lesson_plans lp ON lp.id = f.lesson_plan_id "
+               "WHERE f.id = %s AND lp.org_id = %s", (file_id, db.org))
     if not f:
         raise NotFound("File not found")
     return storage.file_response(f["file_path"], media_type=f["content_type"],
@@ -113,7 +113,8 @@ def download_lesson_file(db: Db, file_id: int) -> FileResponse:
 def delete_lesson_plan(db: Db, user: CurrentUser, plan_id: int) -> dict:
     """Teacher: own plans. Admin/principal/coordinator: any. Sub-admin: none."""
     with db.transaction():
-        plan = db.one("SELECT teacher_id FROM lesson_plans WHERE id = %s FOR UPDATE", (plan_id,))
+        plan = db.one("SELECT teacher_id FROM lesson_plans WHERE id = %s AND org_id = %s FOR UPDATE",
+                      (plan_id, db.org))
         if not plan:
             raise NotFound("Lesson plan not found")
         if user.user_type == "teacher" and plan["teacher_id"] != user.id:

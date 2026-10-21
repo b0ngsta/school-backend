@@ -22,7 +22,11 @@ def test_login_keeps_original_fields_and_adds_refresh(client):
 
     me = client.get("/auth/me", headers=bearer(body))
     assert me.status_code == 200
-    assert set(me.json()) == {"id", "username", "full_name", "email", "phone", "user_type", "is_active"}
+    # the original fields, plus the school the account belongs to
+    assert set(me.json()) == {"id", "username", "full_name", "email", "phone", "user_type", "is_active",
+                              "organisation"}
+    assert me.json()["organisation"] == {"id": 1, "code": "DEFAULT", "name": body["org_name"]}
+    assert body["org_code"] == "DEFAULT"
 
 
 def test_legacy_sha256_hash_is_upgraded_to_argon2(client, db):

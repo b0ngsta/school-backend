@@ -42,6 +42,8 @@ os.environ.update(
     ACCESS_TOKEN_EXPIRE_MINUTES="15",
     REFRESH_REUSE_GRACE_SECONDS="60",
     DB_POOL_PING_AFTER="0",
+    PLATFORM_SECRET="test-platform-secret",
+    DEFAULT_ORG_CODE="DEFAULT",
 )
 
 from dbutil import alembic, recreate_database  # noqa: E402
@@ -53,7 +55,7 @@ from app.services import background  # noqa: E402
 
 background.run_inline = True  # after-response jobs finish before assertions run
 
-_SEEDED_TABLES = ("users", "calendar_events")
+_SEEDED_TABLES = ("organisations", "users", "calendar_events")
 
 
 def _stored_columns(db: Db, table: str) -> list[str]:
@@ -105,7 +107,9 @@ def fresh_db(migrated_db):
 
 @pytest.fixture
 def db():
+    """A session bound to the default school (organisation 1), like a signed-in request."""
     session = Db(pool)
+    session.bind_org(1)
     yield session
     session.close()
 

@@ -23,8 +23,8 @@ def stats(db: Db, day: date | None) -> dict:
         "SUM(status='absent') AS absent, "
         "SUM(status='leave') AS on_leave, "
         "COUNT(*) AS marked "
-        "FROM attendance WHERE date = %s",
-        (day or school_today(),),
+        "FROM attendance WHERE org_id = %s AND date = %s",
+        (db.org, day or school_today()),
     )
     marked, present = int(row["marked"] or 0), int(row["present"] or 0)
     return {
@@ -37,7 +37,7 @@ def stats(db: Db, day: date | None) -> dict:
 
 
 def _section_class(db: Db, section_id: int) -> int:
-    sec = db.one("SELECT class_id FROM sections WHERE id = %s", (section_id,))
+    sec = db.one("SELECT class_id FROM sections WHERE id = %s AND org_id = %s", (section_id, db.org))
     if not sec:
         raise NotFound("Section not found")
     return sec["class_id"]
@@ -51,9 +51,9 @@ def get_attendance(db: Db, user: CurrentUser, section_id: int, day: date) -> lis
         "FROM student_profiles sp "
         "JOIN users u ON u.id = sp.user_id "
         "LEFT JOIN attendance a ON a.student_id = u.id AND a.date = %s "
-        "WHERE sp.section_id = %s AND u.is_active = 1 "
+        "WHERE sp.org_id = %s AND sp.section_id = %s AND u.is_active = 1 "
         "ORDER BY CAST(sp.roll_no AS UNSIGNED), u.full_name",
-        (day, section_id),
+        (day, db.org, section_id),
     )
 
 
@@ -63,10 +63,10 @@ def mark_attendance(db: Db, user: CurrentUser, body: AttendanceMark) -> dict:
         access.ensure_students_in_section(db, body.section_id, (r.student_id for r in body.records))
         previous = _statuses(db, body.date, [r.student_id for r in body.records])
         db.execute_many(
-            "INSERT INTO attendance (student_id, section_id, date, status, marked_by) "
-            "VALUES (%s, %s, %s, %s, %s) "
+            "INSERT INTO attendance (org_id, student_id, section_id, date, status, marked_by) "
+            "VALUES (%s, %s, %s, %s, %s, %s) "
             "ON DUPLICATE KEY UPDATE status = VALUES(status), marked_by = VALUES(marked_by)",
-            [(r.student_id, body.section_id, body.date, r.status, user.id) for r in body.records],
+            [(db.org, r.student_id, body.section_id, body.date, r.status, user.id) for r in body.records],
         )
         audit.record(db, user, "attendance.mark", "section", body.section_id,
                      {"date": body.date, "records": len(body.records)})
@@ -78,8 +78,8 @@ def _statuses(db: Db, day: date, student_ids: list[int]) -> dict[int, str]:
     if not student_ids:
         return {}
     placeholders = ",".join(["%s"] * len(student_ids))
-    rows = db.all(f"SELECT student_id, status FROM attendance WHERE date = %s AND student_id IN ({placeholders})",
-                  (day, *student_ids))
+    rows = db.all(f"SELECT student_id, status FROM attendance WHERE org_id = %s AND date = %s "
+                  f"AND student_id IN ({placeholders})", (db.org, day, *student_ids))
     return {r["student_id"]: r["status"] for r in rows}
 
 
@@ -91,7 +91,7 @@ def _notify_parents(db: Db, body: AttendanceMark, previous: dict[int, str]) -> N
         return
     placeholders = ",".join(["%s"] * len(changed))
     names = {r["id"]: notify.first_name(r["full_name"]) for r in db.all(
-        f"SELECT id, full_name FROM users WHERE id IN ({placeholders})", tuple(changed))}
+        f"SELECT id, full_name FROM users WHERE org_id = %s AND id IN ({placeholders})", (db.org, *changed))}
     today = body.date == school_today()
     when = "today" if today else f"on {notify.day_month(body.date)}"
     data = notify.route("attendance", student=True)

@@ -30,6 +30,10 @@ Limits
 
 A successful reset signs the account out everywhere, clears
 must_change_password, is audited, and the account is told by email.
+
+Every request names the school (`org_code`, DEFAULT_ORG_CODE when left
+out): usernames and emails are only looked up inside that school, the rate
+limits count per school + login, and emails carry the school's name.
 """
 from __future__ import annotations
 
@@ -48,7 +52,7 @@ from app.core.errors import BadRequest, TooManyRequests
 from app.db import Db, pool
 from app.mail import OutgoingEmail
 from app.models.auth import TokenResponse
-from app.services import audit, auth, background, email, login_throttle, sessions
+from app.services import audit, auth, background, email, login_throttle, organisations, sessions
 
 log = logging.getLogger(__name__)
 
@@ -58,11 +62,19 @@ MAX_LISTED_ACCOUNTS = 20
 
 T = TypeVar("T")
 
-_ACCOUNT_COLUMNS = "id, username, full_name, email, user_type, is_active"
+_ACCOUNT_SELECT = (
+    "SELECT u.id, u.org_id, u.username, u.full_name, u.email, u.user_type, u.is_active, o.name AS org_name "
+    "FROM users u JOIN organisations o ON o.id = u.org_id "
+)
 
 
-def _login_key(login: str) -> str:
-    return login.strip().lower()[:120]
+def _login(login: str) -> str:
+    return login.strip().lower()[:110]
+
+
+def _login_key(org_id: int, login: str) -> str:
+    """Rate-limit key: the school and the username/email typed."""
+    return f"{org_id}:{_login(login)}"[:120]
 
 
 def _guess_key(key: str) -> str:
@@ -72,10 +84,11 @@ def _guess_key(key: str) -> str:
 
 # ----------------------------------------------------------------- request
 
-def request_code(db: Db, login: str) -> int:
-    """Email a reset code if `login` matches an active account with an email
-    address. Returns the code lifetime in seconds (always the same)."""
-    key, ip, now = _login_key(login), client_ip(), utcnow()
+def request_code(db: Db, login: str, org_code: str | None = None) -> int:
+    """Email a reset code if `login` matches an active account of the school
+    with an email address. Returns the code lifetime in seconds (always the same)."""
+    org = organisations.resolve(db, org_code)
+    key, ip, now = _login_key(org["id"], login), client_ip(), utcnow()
     _ensure_request_allowed(db, key, ip, now)
     with db.transaction():
         db.execute("INSERT INTO auth_reset_requests (login, ip, created_at) VALUES (%s, %s, %s)", (key, ip, now))
@@ -83,19 +96,20 @@ def request_code(db: Db, login: str) -> int:
                    (now - timedelta(days=RETENTION_DAYS),))
     # Everything that depends on the account happens after the reply, so the
     # response time is the same whether or not the account exists.
-    background.submit(_handle_request, key, ip, now)
+    background.submit(_handle_request, org["id"], _login(login), ip, now)
     return settings.reset_code_ttl_minutes * 60
 
 
-def _handle_request(key: str, ip: str | None, now: datetime) -> None:
+def _handle_request(org_id: int, login: str, ip: str | None, now: datetime) -> None:
     db = Db(pool)
     try:
+        db.bind_org(org_id)
         with db.transaction():
             db.execute("DELETE FROM password_reset_codes WHERE created_at < %s LIMIT 1000",
                        (now - timedelta(days=RETENTION_DAYS),))
-            accounts = _find_accounts(db, key)
+            accounts = _find_accounts(db, org_id, login)
             if len(accounts) > 1:
-                email.send_after_commit(db, [_several_accounts_email(key, accounts)])
+                email.send_after_commit(db, [_several_accounts_email(login, accounts)])
             elif accounts and accounts[0]["is_active"] and accounts[0]["email"]:
                 _issue_code(db, accounts[0], ip, now)
             else:
@@ -129,19 +143,19 @@ def _ensure_request_allowed(db: Db, key: str, ip: str | None, now: datetime) -> 
         )
 
 
-def _find_accounts(db: Db, key: str) -> list[dict]:
-    """The account named by a username, else the active accounts using that
-    email address (comparison is case-insensitive, like logins)."""
-    if not key:
+def _find_accounts(db: Db, org_id: int, login: str) -> list[dict]:
+    """The school's account named by a username, else its active accounts
+    using that email address (comparison is case-insensitive, like logins)."""
+    if not login:
         return []
-    user = db.one(f"SELECT {_ACCOUNT_COLUMNS} FROM users WHERE username = %s", (key,))
+    user = db.one(_ACCOUNT_SELECT + "WHERE u.org_id = %s AND u.username = %s", (org_id, login))
     if user:
         return [user]
-    if "@" not in key:
+    if "@" not in login:
         return []
     return db.all(
-        f"SELECT {_ACCOUNT_COLUMNS} FROM users WHERE email = %s AND is_active = 1 ORDER BY id LIMIT %s",
-        (key, MAX_LISTED_ACCOUNTS),
+        _ACCOUNT_SELECT + "WHERE u.org_id = %s AND u.email = %s AND u.is_active = 1 ORDER BY u.id LIMIT %s",
+        (org_id, login, MAX_LISTED_ACCOUNTS),
     )
 
 
@@ -168,37 +182,35 @@ def _issue_code(db: Db, user: dict, ip: str | None, now: datetime) -> None:
 
 # ------------------------------------------------------------------ redeem
 
-def verify_code(db: Db, login: str, code: str) -> None:
+def verify_code(db: Db, login: str, code: str, org_code: str | None = None) -> None:
     """Check a code without using it up (wrong guesses still count)."""
-    _redeem(db, login, code, then=None)
+    _redeem(db, login, code, org_code, then=None)
 
 
-def reset_password(db: Db, login: str, code: str, new_password: str) -> TokenResponse:
+def reset_password(db: Db, login: str, code: str, new_password: str, org_code: str | None = None) -> TokenResponse:
     def finish(user: dict) -> TokenResponse:
         auth.set_password(db, user["id"], new_password, reason="password_reset")
         audit.record(db, user["id"], "auth.password_reset", "user", user["id"])
         session = sessions.open_session(db, user["id"])
-        fresh = db.one(
-            "SELECT id, full_name, user_type, token_version, must_change_password FROM users WHERE id = %s",
-            (user["id"],),
-        )
+        fresh = db.one(sessions.TOKEN_USER_SQL, (user["id"],))
         email.send_after_commit(db, [_password_changed_email(user)])
         return auth.token_response(fresh, session)
 
-    return _redeem(db, login, code, then=finish)
+    return _redeem(db, login, code, org_code, then=finish)
 
 
-def _redeem(db: Db, login: str, code: str, then: Callable[[dict], T] | None) -> T | None:
+def _redeem(db: Db, login: str, code: str, org_code: str | None, then: Callable[[dict], T] | None) -> T | None:
     """Validate the code; with `then`, mark it used and run `then(user)` in
     the same transaction. Wrong guesses are committed before the error."""
-    key, ip = _login_key(login), client_ip()
+    org = organisations.resolve(db, org_code)
+    key, ip = _login_key(org["id"], login), client_ip()
     login_throttle.ensure_allowed(db, _guess_key(key), ip)
     code = (code or "").strip()
 
     result: T | None = None
     valid = False
     with db.transaction():
-        accounts = _find_accounts(db, key) if _well_formed(code) else []
+        accounts = _find_accounts(db, org["id"], _login(login)) if _well_formed(code) else []
         user = accounts[0] if len(accounts) == 1 and accounts[0]["is_active"] else None
         # the lookup runs for unknown accounts too (user id 0 matches nothing),
         # so timing does not tell them apart
@@ -219,7 +231,7 @@ def _redeem(db: Db, login: str, code: str, then: Callable[[dict], T] | None) -> 
             if then is not None:
                 db.execute("UPDATE password_reset_codes SET used_at = %s WHERE id = %s", (now, row["id"]))
                 # earlier wrong passwords must not keep the account locked out
-                login_throttle.record(db, login_throttle.account_key(user["username"]), ip, success=True)
+                login_throttle.record(db, login_throttle.account_key(org["id"], user["username"]), ip, success=True)
                 result = then(user)
         else:
             if live:
@@ -255,8 +267,12 @@ def _html(paragraphs: list[str]) -> str:
     return "".join(f"<p>{p}</p>" for p in paragraphs)
 
 
+def _school(user: dict) -> str:
+    return user.get("org_name") or settings.school_name
+
+
 def _code_email(user: dict, code: str) -> OutgoingEmail:
-    school, minutes = settings.school_name, settings.reset_code_ttl_minutes
+    school, minutes = _school(user), settings.reset_code_ttl_minutes
     lines = [
         _greeting(user),
         f"Use this code to reset the password of the {school} account '{user['username']}':",
@@ -276,7 +292,7 @@ def _code_email(user: dict, code: str) -> OutgoingEmail:
 
 
 def _several_accounts_email(address: str, accounts: list[dict]) -> OutgoingEmail:
-    school = settings.school_name
+    school = _school(accounts[0])
     names = [f"{a['username']} ({a['full_name']})" for a in accounts]
     intro = f"This email address is linked to several {school} accounts:"
     outro = ("To reset a password, open the app, choose 'Forgot password' and enter the username of "
@@ -291,7 +307,7 @@ def _several_accounts_email(address: str, accounts: list[dict]) -> OutgoingEmail
 
 
 def _password_changed_email(user: dict) -> OutgoingEmail:
-    school = settings.school_name
+    school = _school(user)
     when = datetime.now(SCHOOL_TZ).strftime("%d %b %Y, %I:%M %p")
     lines = [
         _greeting(user),

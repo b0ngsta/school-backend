@@ -17,7 +17,7 @@ ONLY_ADMIN_CREATES = "Only admin can create admin/principal/sub-admin accounts"
 def ensure_no_other_principal(db: Db, user_id: int | None = None) -> None:
     """There is only one principal. (A UNIQUE index enforces the same rule in
     the database, for requests that race past this check.)"""
-    row = db.one("SELECT id, username FROM users WHERE user_type = 'principal' LIMIT 1")
+    row = db.one("SELECT id, username FROM users WHERE org_id = %s AND user_type = 'principal' LIMIT 1", (db.org,))
     if row and row["id"] != user_id:
         raise Conflict(f"There is already a principal ({row['username']}). Only one principal is allowed.")
 
@@ -29,17 +29,17 @@ def create_staff(db: Db, actor: CurrentUser, body: StaffCreate) -> dict:
     with db.transaction():
         if body.user_type == "principal":
             ensure_no_other_principal(db)
-        if db.one("SELECT id FROM users WHERE username = %s", (body.username,)):
+        if db.one("SELECT id FROM users WHERE org_id = %s AND username = %s", (db.org, body.username)):
             raise Conflict("Username already exists")
         try:
             user_id = db.execute(
-                "INSERT INTO users (username, password_hash, full_name, email, phone, user_type) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (body.username, hash_password(body.password), body.full_name,
+                "INSERT INTO users (org_id, username, password_hash, full_name, email, phone, user_type) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (db.org, body.username, hash_password(body.password), body.full_name,
                  body.email, body.phone, body.user_type),
             ).lastrowid
         except DuplicateKey as exc:
-            if exc.key in (None, "username"):
+            if exc.key in (None, "uq_users_org_username"):
                 raise Conflict("Username already exists") from None
             raise
         if body.user_type == "teacher":
@@ -60,8 +60,8 @@ def update_staff(db: Db, actor: CurrentUser, user_id: int, body: StaffUpdate) ->
     admin-only; students are edited through /students."""
     changes = body.model_dump(exclude_unset=True)
     with db.transaction():
-        target = db.one("SELECT id, user_type, full_name, email, phone FROM users WHERE id = %s FOR UPDATE",
-                        (user_id,))
+        target = db.one("SELECT id, user_type, full_name, email, phone FROM users "
+                        "WHERE id = %s AND org_id = %s FOR UPDATE", (user_id, db.org))
         if not target:
             raise NotFound("User not found")
         if target["user_type"] == "student":
@@ -80,14 +80,14 @@ def update_staff(db: Db, actor: CurrentUser, user_id: int, body: StaffUpdate) ->
 def list_users(db: Db, user_type: str | None, page: pagination.Page | None = None) -> pagination.PageResult:
     sql = (
         "SELECT id, username, full_name, email, phone, photo_path, user_type, is_active, created_at "
-        "FROM users"
+        "FROM users WHERE org_id = %s"
     )
-    params: tuple = ()
+    params: tuple = (db.org,)
     if user_type:
-        sql += " WHERE user_type = %s"
-        params = (user_type,)
+        sql += " AND user_type = %s"
+        params = (db.org, user_type)
     else:
-        sql += " WHERE user_type != 'student'"
+        sql += " AND user_type != 'student'"
     return pagination.fetch(db, sql, params, "user_type, full_name, id", page)
 
 
@@ -95,8 +95,8 @@ def delete_user(db: Db, actor: CurrentUser, user_id: int) -> dict:
     if user_id == actor.id:
         raise BadRequest("Cannot delete yourself")
     with db.transaction():
-        target = db.one("SELECT user_type, username, photo_path FROM users WHERE id = %s FOR UPDATE",
-                        (user_id,))
+        target = db.one("SELECT user_type, username, photo_path FROM users WHERE id = %s AND org_id = %s FOR UPDATE",
+                        (user_id, db.org))
         if not target:
             raise NotFound("User not found")
         # deleting mirrors creating: admin/principal/sub_admin accounts are admin-only
@@ -112,7 +112,8 @@ def delete_user(db: Db, actor: CurrentUser, user_id: int) -> dict:
 def upload_photo(db: Db, actor: CurrentUser, user_id: int, file: UploadFile) -> dict:
     """Staff photos: managers. Student photos: managers or the class teacher."""
     with db.transaction():
-        target = db.one("SELECT id, user_type, photo_path FROM users WHERE id = %s FOR UPDATE", (user_id,))
+        target = db.one("SELECT id, user_type, photo_path FROM users WHERE id = %s AND org_id = %s FOR UPDATE",
+                        (user_id, db.org))
         if not target:
             raise NotFound("User not found")
         if target["user_type"] == "student":
@@ -133,14 +134,16 @@ def list_teachers(db: Db) -> list[dict]:
         "t.subject, t.qualification, t.joining_date, t.address, "
         "(SELECT COUNT(*) FROM lesson_plans lp WHERE lp.teacher_id = u.id) AS lesson_plan_count "
         "FROM users u LEFT JOIN teacher_profiles t ON t.user_id = u.id "
-        "WHERE u.user_type = 'teacher' ORDER BY u.full_name"
+        "WHERE u.org_id = %s AND u.user_type = 'teacher' ORDER BY u.full_name",
+        (db.org,),
     )
 
 
 def update_teacher_info(db: Db, user_id: int, body: TeacherInfoUpdate) -> dict:
     """Fields left out of the request keep their current value."""
     with db.transaction():
-        if not db.one("SELECT id FROM users WHERE id = %s AND user_type = 'teacher'", (user_id,)):
+        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'teacher'",
+                      (user_id, db.org)):
             raise NotFound("Teacher not found")
         current = db.one(
             "SELECT subject, qualification, joining_date, address FROM teacher_profiles "

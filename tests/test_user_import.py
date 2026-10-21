@@ -464,8 +464,8 @@ def test_changes_made_while_saving_abort_the_import(client, school, db, monkeypa
     def hash_and_interfere(plan):
         other = Db(pool)  # someone adds a user between the check and the save
         try:
-            other.execute("INSERT INTO users (username, password_hash, full_name, user_type) "
-                          "VALUES ('kid99', 'x', 'Someone Else', 'teacher')")
+            other.execute("INSERT INTO users (org_id, username, password_hash, full_name, user_type) "
+                          "VALUES (1, 'kid99', 'x', 'Someone Else', 'teacher')")
         finally:
             other.close()
         return real_hash(plan)

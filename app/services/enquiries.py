@@ -16,25 +16,26 @@ def stats(db: Db) -> dict:
         "SUM(status = 'new') AS pending, "
         "SUM(status = 'follow_up') AS follow_ups, "
         "COUNT(*) AS total "
-        "FROM enquiries"
+        "FROM enquiries WHERE org_id = %s",
+        (db.org,),
     )
     return {k: int(v or 0) for k, v in row.items()}
 
 
 def list_enquiries(db: Db, status_filter: str | None, page: pagination.Page | None = None) -> pagination.PageResult:
-    sql, params = "SELECT * FROM enquiries", ()
+    sql, params = "SELECT * FROM enquiries WHERE org_id = %s", (db.org,)
     if status_filter:
-        sql += " WHERE status = %s"
-        params = (status_filter,)
+        sql += " AND status = %s"
+        params = (db.org, status_filter)
     return pagination.fetch(db, sql, params, "created_at DESC, id DESC", page)
 
 
 def create_enquiry(db: Db, actor: CurrentUser, body: EnquiryCreate) -> dict:
     enquiry_id = db.execute(
         "INSERT INTO enquiries "
-        "(parent_name, student_name, class_interested, contact, email, notes, created_by) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-        (body.parent_name, body.student_name, body.class_interested,
+        "(org_id, parent_name, student_name, class_interested, contact, email, notes, created_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (db.org, body.parent_name, body.student_name, body.class_interested,
          body.contact, body.email, body.notes, actor.id),
     ).lastrowid
     return {"id": enquiry_id}
@@ -42,7 +43,7 @@ def create_enquiry(db: Db, actor: CurrentUser, body: EnquiryCreate) -> dict:
 
 def update_enquiry(db: Db, enquiry_id: int, body: EnquiryUpdate) -> dict:
     with db.transaction():
-        current = db.one("SELECT * FROM enquiries WHERE id = %s FOR UPDATE", (enquiry_id,))
+        current = db.one("SELECT * FROM enquiries WHERE id = %s AND org_id = %s FOR UPDATE", (enquiry_id, db.org))
         if not current:
             raise NotFound("Enquiry not found")
         merged = {**current, **body.model_dump(exclude_unset=True)}
@@ -56,6 +57,6 @@ def update_enquiry(db: Db, enquiry_id: int, body: EnquiryUpdate) -> dict:
 
 
 def delete_enquiry(db: Db, enquiry_id: int) -> dict:
-    if db.execute("DELETE FROM enquiries WHERE id = %s", (enquiry_id,)).rowcount == 0:
+    if db.execute("DELETE FROM enquiries WHERE id = %s AND org_id = %s", (enquiry_id, db.org)).rowcount == 0:
         raise NotFound("Enquiry not found")
     return {"deleted": enquiry_id}

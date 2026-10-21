@@ -22,8 +22,8 @@ def profile(db: Db, uid: int) -> dict | None:
         "LEFT JOIN student_profiles sp ON sp.user_id = u.id "
         "LEFT JOIN classes c ON c.id = sp.class_id "
         "LEFT JOIN sections s ON s.id = sp.section_id "
-        "WHERE u.id = %s",
-        (uid,),
+        "WHERE u.id = %s AND u.org_id = %s",
+        (uid, db.org),
     )
 
 
@@ -78,14 +78,15 @@ def dashboard(db: Db, uid: int) -> dict:
     if me and me["class_id"]:
         next_exam = db.one(
             "SELECT id, name, start_date, end_date FROM exams "
-            "WHERE (class_id = %s OR class_id IS NULL) AND end_date >= CURDATE() "
+            "WHERE org_id = %s AND (class_id = %s OR class_id IS NULL) AND end_date >= CURDATE() "
             "ORDER BY start_date LIMIT 1",
-            (me["class_id"],),
+            (db.org, me["class_id"]),
         )
     notices = db.all(
         "SELECT n.id, n.title, n.created_at, u.full_name AS posted_by "
-        "FROM notices n JOIN users u ON u.id = n.created_by "
-        "ORDER BY n.created_at DESC LIMIT 3"
+        "FROM notices n JOIN users u ON u.id = n.created_by WHERE n.org_id = %s "
+        "ORDER BY n.created_at DESC LIMIT 3",
+        (db.org,),
     )
     return {
         "profile": me,
@@ -152,8 +153,8 @@ def exams(db: Db, uid: int) -> list[dict]:
         "  r.marks, r.grade, r.remarks "
         "FROM exams e "
         "LEFT JOIN exam_results r ON r.exam_id = e.id AND r.student_id = %s "
-        "WHERE (e.class_id = %s OR e.class_id IS NULL) ORDER BY e.start_date DESC",
-        (uid, me["class_id"]),
+        "WHERE e.org_id = %s AND (e.class_id = %s OR e.class_id IS NULL) ORDER BY e.start_date DESC",
+        (uid, db.org, me["class_id"]),
     )
     # hide marks until results are published
     for e in rows:
@@ -214,8 +215,8 @@ def notices(db: Db, page: pagination.Page | None = None) -> pagination.PageResul
     return pagination.fetch(
         db,
         "SELECT n.id, n.title, n.body, n.created_at, u.full_name AS posted_by "
-        "FROM notices n JOIN users u ON u.id = n.created_by",
-        (),
+        "FROM notices n JOIN users u ON u.id = n.created_by WHERE n.org_id = %s",
+        (db.org,),
         "n.created_at DESC, n.id DESC",
         page,
     )

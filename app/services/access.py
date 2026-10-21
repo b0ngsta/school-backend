@@ -17,9 +17,9 @@ def get_assignments(db: Db, teacher_id: int, class_id: int | None = None,
         "FROM teacher_assignments ta "
         "JOIN classes c ON c.id = ta.class_id "
         "JOIN sections s ON s.id = ta.section_id "
-        "WHERE ta.teacher_id = %s"
+        "WHERE ta.org_id = %s AND ta.teacher_id = %s"
     )
-    params: list = [teacher_id]
+    params: list = [db.org, teacher_id]
     if class_id is not None:
         sql += " AND ta.class_id = %s"
         params.append(class_id)
@@ -33,8 +33,8 @@ def _has_assignment(db: Db, teacher_id: int, class_id: int | None, section_id: i
                     class_teacher_only: bool = False) -> bool:
     # `<=>` (not `=`): a student whose class was deleted has class_id NULL and
     # must not match every teacher's assignments.
-    sql = "SELECT 1 FROM teacher_assignments WHERE teacher_id = %s AND class_id <=> %s"
-    params: list = [teacher_id, class_id]
+    sql = "SELECT 1 FROM teacher_assignments WHERE org_id = %s AND teacher_id = %s AND class_id <=> %s"
+    params: list = [db.org, teacher_id, class_id]
     if section_id is not None:
         sql += " AND section_id = %s"
         params.append(section_id)
@@ -78,8 +78,8 @@ def ensure_students_in_section(db: Db, section_id: int, student_ids: Iterable[in
         return
     placeholders = ",".join(["%s"] * len(wanted))
     rows = db.all(
-        f"SELECT user_id FROM student_profiles WHERE section_id = %s AND user_id IN ({placeholders})",
-        (section_id, *wanted),
+        f"SELECT user_id FROM student_profiles WHERE org_id = %s AND section_id = %s AND user_id IN ({placeholders})",
+        (db.org, section_id, *wanted),
     )
     outside = sorted(wanted - {r["user_id"] for r in rows})
     if outside:

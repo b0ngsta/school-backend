@@ -76,9 +76,12 @@ class ServiceUnavailable(AppError):
 # Friendly messages for UNIQUE keys, by index name.
 _DUPLICATE_MESSAGES = {
     "username": "Username already exists",
+    "uq_users_org_username": "Username already exists",
     "uq_student_admission_no": "Admission number already exists",
+    "uq_student_org_admission_no": "Admission number already exists",
     "uq_student_section_roll": "Roll number already used in this section",
     "uq_users_single_principal": "There is already a principal. Only one principal is allowed.",
+    "uq_users_org_principal": "There is already a principal. Only one principal is allowed.",
 }
 
 

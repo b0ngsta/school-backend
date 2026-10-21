@@ -17,7 +17,9 @@ from app.routes import (
     lessons,
     notices,
     notifications,
+    organisations,
     payments,
+    platform,
     reception,
     settings,
     sms,
@@ -32,6 +34,8 @@ from app.routes import (
 # Same registration order as the original app (new routers before files).
 ALL_ROUTERS = (
     auth.router,
+    organisations.router,
+    platform.router,
     dashboard.router,
     users.router,
     assignments.router,

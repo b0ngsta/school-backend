@@ -18,6 +18,9 @@ Revisions so far:
 | `0002_auth_audit_v8` | Login sessions, login throttling, audit log, indexes. Safe if `migration_v8.sql` was already run by hand. |
 | `0003_student_unique_keys` | Unique admission number (school-wide) and roll number (per section); blank values become NULL. Stops with a list of duplicates if there are any. |
 | `0004_password_reset_principal` | Password-reset codes and request log, an index on `users.email`, and the "only one principal" rule (a virtual column with a UNIQUE index). Stops with a list if there is more than one principal. |
+| `0005_notifications` … `0008_class_homework` | Notifications + device tokens, school timings, substitutions, class homework. |
+| `0009_organisations` | Several schools on one API: `organisations` table, `org_id` on every per-school table (existing rows → organisation 1, code `DEFAULT_ORG_CODE`), per-school unique keys. See `docs/ORGANISATIONS.md`. |
+| `0010_platform_indexes` | Two indexes for the owner portal's cross-school numbers: `auth_sessions(last_used_at)`, `staff_attendance(date, org_id)`. |
 
 **First upgrade of an existing database** (your TiDB):
 
@@ -35,6 +38,21 @@ so autogenerate is not used. Test it with `pytest` — the suite builds its
 database by running every migration.
 
 The old `schema.sql` / `migration_v*.sql` files are in `migrations/legacy/` for reference.
+
+## Schools (organisations)
+
+```bash
+python -m app.cli list-orgs
+python -m app.cli create-org XYZPS "XYZ Public School"     # prompts for the first admin's password
+python -m app.cli change-org-code DEFAULT GVS              # then set DEFAULT_ORG_CODE=GVS and restart
+python -m app.cli disable-org XYZPS
+```
+
+Or over HTTP with `PLATFORM_SECRET` set (header `X-Platform-Secret`), which is
+what the owner portal `work/dashboard` (EduManage HQ) uses to watch every school,
+add schools and reset locked-out accounts. Generate the secret with
+`openssl rand -hex 32` and set the same value in the portal. Full description:
+`docs/ORGANISATIONS.md`.
 
 ## Pagination
 

@@ -32,14 +32,14 @@ STUDENT_SELECT = (
     "LEFT JOIN student_profiles sp ON sp.user_id = u.id "
     "LEFT JOIN classes c ON c.id = sp.class_id "
     "LEFT JOIN sections s ON s.id = sp.section_id "
-    "WHERE u.user_type = 'student'"
+    "WHERE u.org_id = %s AND u.user_type = 'student'"
 )
 
 _PROFILE_FIELDS = ("roll_no", "admission_no", "dob", "father_name", "mother_name", "guardian_phone", "address")
 
 
 def get_student(db: Db, student_id: int) -> dict:
-    student = db.one(STUDENT_SELECT + " AND u.id = %s", (student_id,))
+    student = db.one(STUDENT_SELECT + " AND u.id = %s", (db.org, student_id))
     if not student:
         raise NotFound("Student not found")
     return student
@@ -52,7 +52,8 @@ def _viewable_student(db: Db, user: CurrentUser, student_id: int) -> dict:
 
 
 def _ensure_section_in_class(db: Db, class_id: int | None, section_id: int | None) -> None:
-    if not db.one("SELECT id FROM sections WHERE id = %s AND class_id = %s", (section_id, class_id)):
+    if not db.one("SELECT id FROM sections WHERE id = %s AND class_id = %s AND org_id = %s",
+                  (section_id, class_id, db.org)):
         raise NotFound("Section not found in that class")
 
 
@@ -62,22 +63,22 @@ def create_student(db: Db, actor: CurrentUser, body: StudentCreate) -> dict:
     with db.transaction():
         access.ensure_can_edit_students(db, actor, body.class_id, body.section_id)
         _ensure_section_in_class(db, body.class_id, body.section_id)
-        if db.one("SELECT id FROM users WHERE username = %s", (body.username,)):
+        if db.one("SELECT id FROM users WHERE org_id = %s AND username = %s", (db.org, body.username)):
             raise Conflict("Username already exists")
         try:
             student_id = db.execute(
-                "INSERT INTO users (username, password_hash, full_name, email, phone, user_type) "
-                "VALUES (%s, %s, %s, %s, %s, 'student')",
-                (body.username, hash_password(body.password), body.full_name, body.email, body.phone),
+                "INSERT INTO users (org_id, username, password_hash, full_name, email, phone, user_type) "
+                "VALUES (%s, %s, %s, %s, %s, %s, 'student')",
+                (db.org, body.username, hash_password(body.password), body.full_name, body.email, body.phone),
             ).lastrowid
         except DuplicateKey:
             raise Conflict("Username already exists") from None
         db.execute(
             "INSERT INTO student_profiles "
-            "(user_id, class_id, section_id, roll_no, admission_no, dob, "
+            "(org_id, user_id, class_id, section_id, roll_no, admission_no, dob, "
             " father_name, mother_name, guardian_phone, address) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (student_id, body.class_id, body.section_id, body.roll_no, body.admission_no, body.dob,
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (db.org, student_id, body.class_id, body.section_id, body.roll_no, body.admission_no, body.dob,
              body.father_name, body.mother_name, body.guardian_phone, body.address),
         )
         audit.record(db, actor, "student.create", "user", student_id,
@@ -91,7 +92,7 @@ def list_students(db: Db, user: CurrentUser, class_id: int | None, section_id: i
         if class_id is None or section_id is None:
             raise BadRequest("class_id and section_id required")
         access.ensure_can_view_section(db, user, class_id, section_id)
-    sql, params = STUDENT_SELECT, []
+    sql, params = STUDENT_SELECT, [db.org]
     if class_id is not None:
         sql += " AND sp.class_id = %s"
         params.append(class_id)

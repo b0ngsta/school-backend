@@ -14,6 +14,7 @@ current app keeps working while you go through this list.
 - [7. Lists: pagination](#7-lists-pagination)
 - [8. Photos and files: signed links](#8-photos-and-files-signed-links)
 - [9. Errors you can now get](#9-errors-you-can-now-get)
+- [10. School code (several schools on one server)](#10-school-code-several-schools-on-one-server)
 
 ---
 
@@ -31,6 +32,7 @@ current app keeps working while you go through this list.
 | 8 | Page big lists with `limit`/`offset` (§7) | web + mobile | — (optional, but keeps lists fast as data grows) |
 | 9 | Don't cache photo/file URLs for more than a day (§8) | web + mobile | — |
 | 10 | Show `detail` from 4xx responses; show `request_id` on 500s (§9) | web + mobile | — |
+| 11 | "School code" field on sign-in and forgot-password; send `org_code` (§10) | web + mobile | `DEFAULT_ORG_CODE=` (empty) |
 
 ---
 
@@ -410,3 +412,25 @@ All errors keep the shape `{"detail": "message"}` (validation errors: FastAPI's
 
 Every response has an `X-Request-ID` header. Show it (or the `request_id`) in
 error messages; it finds the matching server log line.
+
+---
+
+## 10. School code (several schools on one server)
+
+The API serves several schools. Sign-in and the forgot-password screens ask
+for the **school code** and send it as `org_code` with `/auth/login`,
+`/auth/forgot-password`, `/auth/verify-reset-code` and `/auth/reset-password`.
+Usernames are unique per school only.
+
+* Pre-fill the field with the last code used on the device (keep it after sign-out).
+* While typing, `GET /organisations/{code}` returns `{code, name}`: show the
+  school's name under the field; a 404 with `detail` "School code not found"
+  means the code is unknown.
+* Token responses carry `org_id`, `org_code`, `org_name`; keep them with the
+  user and show the school's name in the app (sidebar / profile).
+* Errors: 400 "School code not found…" (unknown code), 403 "This school's
+  account is disabled…" (login), 401 on any call once a school is disabled.
+
+Without `org_code` the server uses `DEFAULT_ORG_CODE`, so app builds from
+before this change still sign in to the original school. Details:
+`docs/ORGANISATIONS.md`.

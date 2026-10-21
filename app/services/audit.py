@@ -1,7 +1,9 @@
 """Audit trail for sensitive actions (who changed marks, fees, accounts…).
 
 Rows are written inside the caller's transaction, so an action and its audit
-entry are committed (or rolled back) together.
+entry are committed (or rolled back) together. Each row carries the
+organisation the request is bound to (NULL for platform-level actions
+outside any school).
 """
 from __future__ import annotations
 
@@ -23,9 +25,10 @@ def record(
 ) -> None:
     actor_id = actor.id if isinstance(actor, CurrentUser) else actor
     db.execute(
-        "INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, details, ip, request_id) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO audit_logs (org_id, actor_id, action, entity_type, entity_id, details, ip, request_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         (
+            db.org if db.has_org else None,
             actor_id,
             action,
             entity_type,

@@ -9,6 +9,9 @@ worker processes) and counted over a sliding window:
 
 A successful login resets the account counters. Blocked callers get HTTP 429
 with a Retry-After header; no password is checked while blocked.
+
+Accounts are keyed "<organisation id>:<username>", since usernames are only
+unique within a school.
 """
 from __future__ import annotations
 
@@ -23,8 +26,8 @@ from app.db import Db
 RETENTION_DAYS = 30
 
 
-def account_key(username: str) -> str:
-    return username.strip().lower()[:100]
+def account_key(org_id: int, username: str) -> str:
+    return f"{org_id}:{username.strip().lower()}"[:100]
 
 
 def ensure_allowed(db: Db, username_key: str, ip: str | None) -> None:

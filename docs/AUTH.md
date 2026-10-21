@@ -16,17 +16,22 @@ throw the old one away.
 
 ## Endpoints
 
+One server hosts several schools: `org_code` (the school code, e.g. `XYZPS`)
+picks the school on sign-in and password reset; leave it out and the server's
+`DEFAULT_ORG_CODE` is used. See `docs/ORGANISATIONS.md`.
+
 ```http
-POST /auth/login            {"username", "password"}
+GET  /organisations/{code}  → {"code", "name"}  (show the school's name on the login screen; 404 = unknown)
+POST /auth/login            {"org_code", "username", "password"}
 POST /auth/refresh          {"refresh_token"}
 POST /auth/logout           Authorization: Bearer …   (or {"refresh_token"} if the access token expired)
 POST /auth/logout-all       Authorization: Bearer …   signs out every device
 POST /auth/change-password  {"current_password", "new_password"}  → returns fresh tokens
 GET  /auth/me
 
-POST /auth/forgot-password    {"login"}                          → emails a 6-digit code
-POST /auth/verify-reset-code  {"login", "code"}                  → {"valid": true} (optional step)
-POST /auth/reset-password     {"login", "code", "new_password"}  → returns fresh tokens
+POST /auth/forgot-password    {"org_code", "login"}                          → emails a 6-digit code
+POST /auth/verify-reset-code  {"org_code", "login", "code"}                  → {"valid": true} (optional step)
+POST /auth/reset-password     {"org_code", "login", "code", "new_password"}  → returns fresh tokens
 ```
 
 Login / refresh / change-password all return:
@@ -37,11 +42,13 @@ Login / refresh / change-password all return:
   "user_id": 1, "user_type": "admin", "full_name": "Admin",
   "expires_in": 900,
   "refresh_token": "rt1.…", "refresh_expires_in": 2592000,
-  "must_change_password": false
+  "must_change_password": false,
+  "org_id": 2, "org_code": "XYZPS", "org_name": "XYZ Public School"
 }
 ```
 
 The first five fields are unchanged, so existing screens keep working.
+`GET /auth/me` also returns `organisation: {id, code, name}`.
 
 ## The three rules
 

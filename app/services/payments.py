@@ -27,7 +27,8 @@ def stats(db: Db) -> dict:
         "AND MONTH(created_at)=MONTH(CURDATE()) THEN amount END),0) AS month_collection, "
         "COUNT(*) AS total_transactions, "
         "COALESCE(ROUND(SUM(status='success') / NULLIF(COUNT(*),0) * 100, 1), 0) AS success_rate "
-        "FROM transactions"
+        "FROM transactions WHERE org_id = %s",
+        (db.org,),
     )
     return {
         "today_collection": float(row["today_collection"]),
@@ -44,8 +45,9 @@ def list_transactions(db: Db, page: pagination.Page | None = None) -> pagination
         "SELECT t.*, u.full_name AS student_name, f.title AS fee_title "
         "FROM transactions t "
         "LEFT JOIN users u ON u.id = t.student_id "
-        "LEFT JOIN fees f ON f.id = t.fee_id",
-        (),
+        "LEFT JOIN fees f ON f.id = t.fee_id "
+        "WHERE t.org_id = %s",
+        (db.org,),
         "t.created_at DESC, t.id DESC",
         page,
         default_limit=200,
@@ -55,14 +57,14 @@ def list_transactions(db: Db, page: pagination.Page | None = None) -> pagination
 def create_transaction(db: Db, actor: CurrentUser, body: TransactionCreate) -> dict:
     with db.transaction():
         if body.student_id is not None and not db.one(
-            "SELECT id FROM users WHERE id = %s AND user_type = 'student'", (body.student_id,)
+            "SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'student'", (body.student_id, db.org)
         ):
             raise NotFound("Student not found")
         reference = new_reference()
         transaction_id = db.execute(
-            "INSERT INTO transactions (reference, student_id, amount, method, status) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (reference, body.student_id, body.amount, body.method, body.status),
+            "INSERT INTO transactions (org_id, reference, student_id, amount, method, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (db.org, reference, body.student_id, body.amount, body.method, body.status),
         ).lastrowid
         audit.record(db, actor, "transaction.create", "transaction", transaction_id,
                      {"reference": reference, **body.model_dump()})

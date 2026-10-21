@@ -19,19 +19,23 @@ from app.services import storage
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def _actor(db, username="admin") -> CurrentUser:
-    row = db.one("SELECT * FROM users WHERE username = %s", (username,))
+def _actor(db, username="admin", org_id=1) -> CurrentUser:
+    row = db.one("SELECT u.*, o.code, o.name AS org_name FROM users u JOIN organisations o ON o.id = u.org_id "
+                 "WHERE u.org_id = %s AND u.username = %s", (org_id, username))
     return CurrentUser(id=row["id"], username=row["username"], full_name=row["full_name"], email=None,
                        phone=None, user_type=row["user_type"], is_active=1, session_id="x",
-                       must_change_password=False)
+                       must_change_password=False, org_id=row["org_id"], org_code=row["code"],
+                       org_name=row["org_name"])
 
 
-def _run_concurrently(fn, n=5):
-    """Run fn(db, worker_index) in n threads that start at the same instant."""
+def _run_concurrently(fn, n=5, org_id=1):
+    """Run fn(db, worker_index) in n threads that start at the same instant
+    (each with its own session, bound to the school like an API request)."""
     results, barrier = [], threading.Barrier(n)
 
     def worker(index):
         db = Db(pool)
+        db.bind_org(org_id)
         try:
             db.scalar("SELECT 1")  # hold a live connection so all workers really start together
             barrier.wait()

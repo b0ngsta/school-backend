@@ -51,7 +51,7 @@ def test_grouped_list_can_be_paged(school):
 def test_transactions_keep_their_default_cap(client, db):
     a = bearer(login(client, "admin"))
     db.execute_many(
-        "INSERT INTO transactions (reference, amount, method, status) VALUES (%s, 10, 'cash', 'success')",
+        "INSERT INTO transactions (org_id, reference, amount, method, status) VALUES (1, %s, 10, 'cash', 'success')",
         [(f"TXN{i:010d}",) for i in range(205)],
     )
     assert len(client.get("/transactions", headers=a).json()) == 200

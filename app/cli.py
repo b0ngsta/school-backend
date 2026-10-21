@@ -1,13 +1,23 @@
 """Admin command line.
 
-    python -m app.cli set-password <username>     # prompts for the new password
-    python -m app.cli revoke-sessions <username>  # sign the user out everywhere
-    python -m app.cli list-sessions <username>
+    python -m app.cli set-password <username> [--org CODE]   # prompts for the new password
+    python -m app.cli revoke-sessions <username> [--org CODE] # sign the user out everywhere
+    python -m app.cli list-sessions <username> [--org CODE]
     python -m app.cli check-db                    # connection, TLS and round-trip latency
     python -m app.cli check-data                  # duplicate numbers, extra principals, missing emails
     python -m app.cli copy-uploads-to-s3          # copy UPLOAD_DIR into the S3 bucket
 
-Inside Docker:  docker compose exec api python -m app.cli set-password admin
+Organisations (schools):
+    python -m app.cli list-orgs
+    python -m app.cli create-org <CODE> "<School name>" [--admin-username admin] [--admin-email x@y.z]
+                                                  # prompts for the first admin's password
+    python -m app.cli rename-org <CODE> "<New name>"
+    python -m app.cli change-org-code <CODE> <NEW-CODE>    # users type the new code from then on
+    python -m app.cli disable-org <CODE> | enable-org <CODE>
+
+--org defaults to DEFAULT_ORG_CODE (the school that existed before organisations).
+
+Inside Docker:  docker compose exec api python -m app.cli set-password admin --org XYZPS
 """
 from __future__ import annotations
 
@@ -21,14 +31,26 @@ import time
 from app.core.config import settings
 from app.db import Db, pool
 from app.models.common import PASSWORD_MAX_LENGTH
+from app.models.organisations import OrganisationCreate, OrganisationUpdate
 from app.services import auth as auth_service
-from app.services import sessions
+from app.services import organisations, sessions
+
+
+def _org(db: Db, code: str | None) -> dict:
+    code = (code or settings.default_org_code or "").strip()
+    if not code:
+        sys.exit("Name the school with --org CODE")
+    org = organisations.find(db, code)
+    if not org:
+        sys.exit(f"No school with code {code!r} (see `python -m app.cli list-orgs`)")
+    db.bind_org(org["id"])
+    return org
 
 
 def _user_id(db: Db, username: str) -> int:
-    row = db.one("SELECT id FROM users WHERE username = %s", (username,))
+    row = db.one("SELECT id FROM users WHERE org_id = %s AND username = %s", (db.org, username))
     if not row:
-        sys.exit(f"No user named {username!r}")
+        sys.exit(f"No user named {username!r} in this school")
     return row["id"]
 
 
@@ -85,12 +107,12 @@ def check_db(db: Db) -> None:
 def check_data(db: Db) -> None:
     """Report data that blocks a migration (duplicate student numbers, more
     than one principal) or a feature (accounts without an email address
-    cannot reset a forgotten password)."""
+    cannot reset a forgotten password). Covers every school."""
     dupes = db.all(
         "SELECT 'admission no' AS kind, TRIM(sp.admission_no) AS value, "
         "GROUP_CONCAT(CONCAT(u.full_name, ' (id ', u.id, ')') SEPARATOR ', ') AS students "
         "FROM student_profiles sp JOIN users u ON u.id = sp.user_id "
-        "WHERE TRIM(sp.admission_no) <> '' GROUP BY TRIM(sp.admission_no) HAVING COUNT(*) > 1 "
+        "WHERE TRIM(sp.admission_no) <> '' GROUP BY u.org_id, TRIM(sp.admission_no) HAVING COUNT(*) > 1 "
         "UNION ALL "
         "SELECT CONCAT('roll no in section ', sp.section_id), TRIM(sp.roll_no), "
         "GROUP_CONCAT(CONCAT(u.full_name, ' (id ', u.id, ')') SEPARATOR ', ') "
@@ -99,19 +121,22 @@ def check_data(db: Db) -> None:
     )
     for d in dupes:
         print(f"{d['kind']} {d['value']!r}: {d['students']}")
-    principals = db.all("SELECT id, username, full_name FROM users WHERE user_type = 'principal' ORDER BY id")
-    if len(principals) > 1:
-        print("More than one principal (only one is allowed): "
-              + ", ".join(f"{p['username']} (id {p['id']})" for p in principals))
-    blocking = len(dupes) + (len(principals) > 1)
+    principals = db.all(
+        "SELECT o.code, GROUP_CONCAT(CONCAT(u.username, ' (id ', u.id, ')') SEPARATOR ', ') AS names "
+        "FROM users u JOIN organisations o ON o.id = u.org_id WHERE u.user_type = 'principal' "
+        "GROUP BY o.code HAVING COUNT(*) > 1"
+    )
+    for p in principals:
+        print(f"More than one principal in {p['code']} (only one is allowed): {p['names']}")
+    blocking = len(dupes) + len(principals)
     print("Nothing blocks the migrations." if not blocking else f"{blocking} problem(s); fix them before migrating.")
 
     no_email = db.all(
-        "SELECT username, user_type FROM users WHERE is_active = 1 AND (email IS NULL OR TRIM(email) = '') "
-        "ORDER BY user_type, username"
+        "SELECT o.code, u.username, u.user_type FROM users u JOIN organisations o ON o.id = u.org_id "
+        "WHERE u.is_active = 1 AND (u.email IS NULL OR TRIM(u.email) = '') ORDER BY o.code, u.user_type, u.username"
     )
     if no_email:
-        shown = ", ".join(f"{u['username']} ({u['user_type']})" for u in no_email[:30])
+        shown = ", ".join(f"{u['code']}/{u['username']} ({u['user_type']})" for u in no_email[:30])
         more = f" and {len(no_email) - 30} more" if len(no_email) > 30 else ""
         print(f"{len(no_email)} active account(s) have no email and cannot reset a forgotten password: "
               f"{shown}{more}")
@@ -144,16 +169,50 @@ def copy_uploads_to_s3() -> None:
           "Local files were left in place.")
 
 
+# ------------------------------------------------------------ organisations
+
+def list_orgs(db: Db) -> None:
+    for o in organisations.list_all(db):
+        state = "active" if o["is_active"] else "DISABLED"
+        print(f"{o['code']:<16} {o['name']:<40} {state:<8} {o['staff']} staff, {o['students']} students")
+
+
+def create_org(db: Db, code: str, name: str, admin_username: str, admin_email: str | None) -> None:
+    password = getpass.getpass(f"Password for the first admin ({admin_username}): ")
+    if getpass.getpass("Repeat: ") != password:
+        sys.exit("Passwords do not match.")
+    try:
+        body = OrganisationCreate(code=code, name=name, admin_username=admin_username, admin_password=password,
+                                  admin_email=admin_email)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    created = organisations.create(db, body)
+    print(f"School {created['code']} ({created['name']}) created. Sign in with school code {created['code']}, "
+          f"username {admin_username!r}; the password must be changed at first login.")
+
+
+def update_org(db: Db, code: str, **changes) -> None:
+    org = organisations.update(db, code, OrganisationUpdate(**changes))
+    print(f"{org['code']}: {org['name']} ({'active' if org['is_active'] else 'disabled'})")
+
+
 USER_COMMANDS = {"set-password": set_password, "revoke-sessions": revoke_sessions, "list-sessions": list_sessions}
+ORG_COMMANDS = ("list-orgs", "create-org", "rename-org", "change-org-code", "disable-org", "enable-org")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
-    parser.add_argument("command", choices=sorted([*USER_COMMANDS, "check-db", "check-data", "copy-uploads-to-s3"]))
-    parser.add_argument("username", nargs="?")
+    parser.add_argument("command", choices=sorted([*USER_COMMANDS, *ORG_COMMANDS, "check-db", "check-data",
+                                                   "copy-uploads-to-s3"]))
+    parser.add_argument("args", nargs="*", help="username, or school code [and name] for the *-org commands")
+    parser.add_argument("--org", help="school code (default: DEFAULT_ORG_CODE)")
+    parser.add_argument("--admin-username", default="admin")
+    parser.add_argument("--admin-email")
     args = parser.parse_args()
-    if args.command in USER_COMMANDS and not args.username:
-        parser.error(f"{args.command} needs a username")
+    needs = {**dict.fromkeys(USER_COMMANDS, 1), "create-org": 2, "rename-org": 2, "change-org-code": 2,
+             "disable-org": 1, "enable-org": 1}
+    if len(args.args) < needs.get(args.command, 0):
+        parser.error(f"{args.command} needs {needs[args.command]} argument(s)")
     db = Db(pool)
     try:
         if args.command == "check-db":
@@ -162,8 +221,22 @@ def main() -> None:
             check_data(db)
         elif args.command == "copy-uploads-to-s3":
             copy_uploads_to_s3()
+        elif args.command == "list-orgs":
+            list_orgs(db)
+        elif args.command == "create-org":
+            create_org(db, args.args[0], args.args[1], args.admin_username, args.admin_email)
+        elif args.command == "rename-org":
+            update_org(db, args.args[0], name=args.args[1])
+        elif args.command == "change-org-code":
+            update_org(db, args.args[0], code=args.args[1])
+            if args.args[0].strip().upper() == settings.default_org_code:
+                print(f"Note: DEFAULT_ORG_CODE is {settings.default_org_code}; set it to the new code so apps "
+                      "that send no school code keep signing in to this school.")
+        elif args.command in ("disable-org", "enable-org"):
+            update_org(db, args.args[0], is_active=args.command == "enable-org")
         else:
-            USER_COMMANDS[args.command](db, args.username)
+            _org(db, args.org)
+            USER_COMMANDS[args.command](db, args.args[0])
     finally:
         db.close()
         pool.close_all()

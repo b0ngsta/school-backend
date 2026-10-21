@@ -1,6 +1,6 @@
 """School timings: start of day, prayer, period length, periods per day and
-breaks. A single row; every timetable (and substitution message) shows
-clock times computed from it.
+breaks. One row per school (organisation); every timetable (and
+substitution message) shows clock times computed from it.
 
 Example: start 06:30 + 30 min prayer -> period 1 at 07:00; a 20 min break
 after period 3 shifts period 4 onwards by 20 minutes.
@@ -16,8 +16,6 @@ from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.school_timings import SchoolTimings
 from app.services import audit
-
-ROW_ID = 1
 
 
 def _minutes(value) -> int:
@@ -48,7 +46,9 @@ def compute_periods(start_time, prayer_minutes: int, period_minutes: int, period
 def _load(db: Db, lock: bool = False) -> dict | None:
     row = db.one(
         "SELECT t.*, u.full_name AS updated_by_name FROM school_timings t "
-        "LEFT JOIN users u ON u.id = t.updated_by ORDER BY t.id LIMIT 1" + (" FOR UPDATE" if lock else "")
+        "LEFT JOIN users u ON u.id = t.updated_by WHERE t.org_id = %s ORDER BY t.id LIMIT 1"
+        + (" FOR UPDATE" if lock else ""),
+        (db.org,),
     )
     if row and isinstance(row["breaks"], (str, bytes)):
         row["breaks"] = json.loads(row["breaks"])
@@ -83,7 +83,7 @@ def period_times(db: Db) -> dict[int, dict]:
 
 
 def periods_per_day(db: Db) -> int | None:
-    return db.scalar("SELECT periods_per_day FROM school_timings ORDER BY id LIMIT 1")
+    return db.scalar("SELECT periods_per_day FROM school_timings WHERE org_id = %s ORDER BY id LIMIT 1", (db.org,))
 
 
 def period_start(day: date, period: int, times: dict[int, dict]) -> datetime | None:
@@ -98,11 +98,11 @@ def period_start(day: date, period: int, times: dict[int, dict]) -> datetime | N
 def save_timings(db: Db, actor: CurrentUser, body: SchoolTimings, force: bool = False) -> dict:
     breaks = [b.model_dump(exclude_none=True) for b in sorted(body.breaks, key=lambda b: b.after_period)]
     with db.transaction():
-        current = _load(db, lock=True)
+        _load(db, lock=True)
         beyond = db.all(
             "SELECT DISTINCT u.id, u.full_name FROM timetable_slots t JOIN users u ON u.id = t.teacher_id "
-            "WHERE t.period > %s ORDER BY u.full_name",
-            (body.periods_per_day,),
+            "WHERE t.org_id = %s AND t.period > %s ORDER BY u.full_name",
+            (db.org, body.periods_per_day),
         )
         if beyond and not force:
             names = ", ".join(r["full_name"] for r in beyond)
@@ -111,17 +111,19 @@ def save_timings(db: Db, actor: CurrentUser, body: SchoolTimings, force: bool = 
                 "Move those classes first, or save with ?force=true to delete them."
             )
         if beyond:
-            db.execute("DELETE FROM timetable_slots WHERE period > %s", (body.periods_per_day,))
+            db.execute("DELETE FROM timetable_slots WHERE org_id = %s AND period > %s",
+                       (db.org, body.periods_per_day))
         values = (body.start_time, body.prayer_minutes, body.period_minutes, body.periods_per_day,
                   json.dumps(breaks), actor.id)
+        # one row per school (UNIQUE org_id): insert the first time, update after
         db.execute(
-            "INSERT INTO school_timings (id, start_time, prayer_minutes, period_minutes, periods_per_day, "
+            "INSERT INTO school_timings (org_id, start_time, prayer_minutes, period_minutes, periods_per_day, "
             "breaks, updated_by) VALUES (%s, %s, %s, %s, %s, %s, %s) "
             "ON DUPLICATE KEY UPDATE start_time = VALUES(start_time), prayer_minutes = VALUES(prayer_minutes), "
             "period_minutes = VALUES(period_minutes), periods_per_day = VALUES(periods_per_day), "
             "breaks = VALUES(breaks), updated_by = VALUES(updated_by), updated_at = CURRENT_TIMESTAMP",
-            (current["id"] if current else ROW_ID, *values),
+            (db.org, *values),
         )
-        audit.record(db, actor, "school_timings.update", "school_timings", ROW_ID,
+        audit.record(db, actor, "school_timings.update", "school_timings", db.org,
                      {**body.model_dump(), "deleted_slots_after_period": bool(beyond)})
     return get_timings(db)

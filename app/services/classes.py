@@ -27,11 +27,12 @@ def _set_subjects(db: Db, class_id: int, subjects: list[str]) -> None:
 
 def create_class(db: Db, body: ClassCreate) -> dict:
     with db.transaction():
-        if db.one("SELECT id FROM classes WHERE name = %s", (body.name,)):
+        if db.one("SELECT id FROM classes WHERE org_id = %s AND name = %s", (db.org, body.name)):
             raise Conflict("Class already exists")
         try:
             class_id = db.execute(
-                "INSERT INTO classes (name, fee_amount) VALUES (%s, %s)", (body.name, body.fee_amount)
+                "INSERT INTO classes (org_id, name, fee_amount) VALUES (%s, %s, %s)",
+                (db.org, body.name, body.fee_amount),
             ).lastrowid
         except DuplicateKey:
             raise Conflict("Class already exists") from None
@@ -42,7 +43,7 @@ def create_class(db: Db, body: ClassCreate) -> dict:
 
 def update_subjects(db: Db, class_id: int, body: SubjectsUpdate) -> dict:
     with db.transaction():
-        if not db.one("SELECT id FROM classes WHERE id = %s FOR UPDATE", (class_id,)):
+        if not db.one("SELECT id FROM classes WHERE id = %s AND org_id = %s FOR UPDATE", (class_id, db.org)):
             raise NotFound("Class not found")
         _set_subjects(db, class_id, body.subjects)
         rows = db.all("SELECT name FROM class_subjects WHERE class_id = %s ORDER BY id", (class_id,))
@@ -51,15 +52,17 @@ def update_subjects(db: Db, class_id: int, body: SubjectsUpdate) -> dict:
 
 def list_classes(db: Db) -> list[dict]:
     """Classes with sections; each section carries student count + class teacher name."""
-    classes = db.all("SELECT * FROM classes ORDER BY name")
+    classes = db.all("SELECT * FROM classes WHERE org_id = %s ORDER BY name", (db.org,))
     sections = db.all(
         "SELECT s.*, "
         "(SELECT COUNT(*) FROM student_profiles sp WHERE sp.section_id = s.id) AS student_count, "
         "(SELECT u.full_name FROM teacher_assignments ta JOIN users u ON u.id = ta.teacher_id "
         " WHERE ta.section_id = s.id AND ta.role = 'class_teacher' LIMIT 1) AS class_teacher "
-        "FROM sections s ORDER BY s.class_id, s.name"
+        "FROM sections s WHERE s.org_id = %s ORDER BY s.class_id, s.name",
+        (db.org,),
     )
-    subjects = db.all("SELECT class_id, name FROM class_subjects ORDER BY class_id, id")
+    subjects = db.all("SELECT cs.class_id, cs.name FROM class_subjects cs JOIN classes c ON c.id = cs.class_id "
+                      "WHERE c.org_id = %s ORDER BY cs.class_id, cs.id", (db.org,))
 
     by_class: dict[int, list] = {}
     for s in sections:
@@ -74,20 +77,20 @@ def list_classes(db: Db) -> list[dict]:
 
 
 def delete_class(db: Db, class_id: int) -> dict:
-    if db.execute("DELETE FROM classes WHERE id = %s", (class_id,)).rowcount == 0:
+    if db.execute("DELETE FROM classes WHERE id = %s AND org_id = %s", (class_id, db.org)).rowcount == 0:
         raise NotFound("Class not found")
     return {"deleted": class_id}
 
 
 def create_section(db: Db, class_id: int, body: SectionCreate) -> dict:
     with db.transaction():
-        if not db.one("SELECT id FROM classes WHERE id = %s", (class_id,)):
+        if not db.one("SELECT id FROM classes WHERE id = %s AND org_id = %s", (class_id, db.org)):
             raise NotFound("Class not found")
         if db.one("SELECT id FROM sections WHERE class_id = %s AND name = %s", (class_id, body.name)):
             raise Conflict("Section already exists")
         try:
             section_id = db.execute(
-                "INSERT INTO sections (class_id, name) VALUES (%s, %s)", (class_id, body.name)
+                "INSERT INTO sections (org_id, class_id, name) VALUES (%s, %s, %s)", (db.org, class_id, body.name)
             ).lastrowid
         except DuplicateKey:
             raise Conflict("Section already exists") from None
@@ -95,7 +98,7 @@ def create_section(db: Db, class_id: int, body: SectionCreate) -> dict:
 
 
 def delete_section(db: Db, class_id: int, section_id: int) -> dict:
-    if db.execute("DELETE FROM sections WHERE id = %s AND class_id = %s",
-                  (section_id, class_id)).rowcount == 0:
+    if db.execute("DELETE FROM sections WHERE id = %s AND class_id = %s AND org_id = %s",
+                  (section_id, class_id, db.org)).rowcount == 0:
         raise NotFound("Section not found")
     return {"deleted": section_id}

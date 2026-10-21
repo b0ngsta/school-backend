@@ -49,7 +49,9 @@ def test_fresh_install_creates_everything(scratch_db):
     tables = {t for (t,) in _query(scratch_db, "SHOW TABLES")}
     assert {"users", "auth_sessions", "audit_logs", "calendar_events", "alembic_version"} <= tables
     assert _query(scratch_db, "SELECT COUNT(*) FROM users WHERE must_change_password = 1")[0][0] == 5
-    assert _query(scratch_db, "SELECT version_num FROM alembic_version")[0][0] == "0008_class_homework"
+    assert _query(scratch_db, "SELECT version_num FROM alembic_version")[0][0] == "0010_platform_indexes"
+    assert _query(scratch_db, "SELECT code FROM organisations")[0][0] == "DEFAULT"
+    assert _query(scratch_db, "SELECT COUNT(*) FROM users WHERE org_id = 1")[0][0] == 5
 
 
 def test_legacy_schema_is_adopted_and_ends_identical(scratch_db):
@@ -111,11 +113,49 @@ def test_database_refuses_a_second_principal(scratch_db):
     name = scratch_db.rsplit("/", 1)[1]
     conn = pymysql.connect(**_conn_kwargs(scratch_db), database=name, autocommit=True)
     try:
-        with conn.cursor() as cur, pytest.raises(pymysql.err.IntegrityError, match="uq_users_single_principal"):
-            cur.execute("INSERT INTO users (username, password_hash, full_name, user_type) "
-                        "VALUES ('vp', 'x', 'Vice Principal', 'principal')")
+        with conn.cursor() as cur, pytest.raises(pymysql.err.IntegrityError, match="uq_users_org_principal"):
+            cur.execute("INSERT INTO users (org_id, username, password_hash, full_name, user_type) "
+                        "VALUES (1, 'vp', 'x', 'Vice Principal', 'principal')")
         with conn.cursor() as cur:  # any number of other roles is fine
-            cur.execute("INSERT INTO users (username, password_hash, full_name, user_type) "
-                        "VALUES ('t1', 'x', 'T', 'teacher'), ('t2', 'x', 'T', 'teacher')")
+            cur.execute("INSERT INTO users (org_id, username, password_hash, full_name, user_type) "
+                        "VALUES (1, 't1', 'x', 'T', 'teacher'), (1, 't2', 'x', 'T', 'teacher')")
+        with conn.cursor() as cur:  # and another school has its own principal
+            cur.execute("INSERT INTO organisations (code, name) VALUES ('ABC', 'ABC School')")
+            cur.execute("INSERT INTO users (org_id, username, password_hash, full_name, user_type) "
+                        "VALUES (LAST_INSERT_ID(), 'principal', 'x', 'P', 'principal')")
+    finally:
+        conn.close()
+
+
+def test_existing_school_becomes_organisation_one(scratch_db):
+    """A database in use before organisations: every row lands in organisation 1,
+    and the unique rules become per school."""
+    alembic(scratch_db, "upgrade", "0008_class_homework")
+    name = scratch_db.rsplit("/", 1)[1]
+    conn = pymysql.connect(**_conn_kwargs(scratch_db), database=name, autocommit=True)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO classes (name) VALUES ('C1')")
+        cur.execute("INSERT INTO sections (class_id, name) VALUES (LAST_INSERT_ID(), 'A')")
+        cur.execute("INSERT INTO holidays (date, name, created_by) VALUES ('2026-01-26', 'Republic Day', 1)")
+    conn.close()
+    alembic(scratch_db)
+    for table in ("users", "classes", "sections", "holidays", "calendar_events"):
+        assert _query(scratch_db, f"SELECT COUNT(*) FROM {table} WHERE org_id <> 1")[0][0] == 0
+        assert _query(scratch_db, f"SELECT COUNT(*) FROM {table}")[0][0] > 0
+    conn = pymysql.connect(**_conn_kwargs(scratch_db), database=name, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO organisations (code, name) VALUES ('ABC', 'ABC School')")
+            org = cur.lastrowid
+            # the same names in another school are fine …
+            cur.execute("INSERT INTO classes (org_id, name) VALUES (%s, 'C1')", (org,))
+            cur.execute("INSERT INTO users (org_id, username, password_hash, full_name, user_type) "
+                        "VALUES (%s, 'admin', 'x', 'Admin', 'admin')", (org,))
+            cur.execute("INSERT INTO holidays (org_id, date, name, created_by) "
+                        "VALUES (%s, '2026-01-26', 'Republic Day', LAST_INSERT_ID())", (org,))
+        with conn.cursor() as cur, pytest.raises(pymysql.err.IntegrityError, match="uq_classes_org_name"):
+            cur.execute("INSERT INTO classes (org_id, name) VALUES (%s, 'C1')", (org,))  # … but not twice in one
+        with conn.cursor() as cur, pytest.raises(pymysql.err.OperationalError, match="org_id"):
+            cur.execute("INSERT INTO notices (created_by, title, body) VALUES (1, 't', 'b')")  # no school: refused
     finally:
         conn.close()

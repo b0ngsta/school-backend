@@ -246,8 +246,8 @@ def _existing_users(db: Db, usernames: list[str], lock: bool) -> dict[str, dict]
     unique = sorted(set(usernames), key=fold)  # stable lock order
     for i in range(0, len(unique), _CHUNK):
         part = unique[i:i + _CHUNK]
-        sql = EXISTING_SQL + f"WHERE u.username IN ({', '.join(['%s'] * len(part))})"
-        for user in db.all(sql + (" FOR UPDATE" if lock else ""), part):
+        sql = EXISTING_SQL + f"WHERE u.org_id = %s AND u.username IN ({', '.join(['%s'] * len(part))})"
+        for user in db.all(sql + (" FOR UPDATE" if lock else ""), [db.org, *part]):
             found[fold(user["username"])] = user
     return found
 
@@ -322,8 +322,8 @@ def _same(current: Any, new: Any) -> bool:
 # ------------------------------------------------------- cross-row rules
 
 def _one_principal(db: Db, plan: Plan, lock: bool) -> None:
-    current = db.one("SELECT id, username FROM users WHERE user_type = 'principal' LIMIT 1"
-                     + (" FOR UPDATE" if lock else ""))
+    current = db.one("SELECT id, username FROM users WHERE org_id = %s AND user_type = 'principal' LIMIT 1"
+                     + (" FOR UPDATE" if lock else ""), (db.org,))
     creates = [r for r in plan.rows if r.action == CREATE]  # with or without other problems
     for row in creates:
         if current is not None:
@@ -364,14 +364,14 @@ def _unique_student_numbers(db: Db, plan: Plan, lock: bool) -> None:
             "SELECT sp.user_id, sp.admission_no AS value, u.full_name, c.name AS class_name, s.name AS section_name "
             "FROM student_profiles sp JOIN users u ON u.id = sp.user_id "
             "LEFT JOIN classes c ON c.id = sp.class_id LEFT JOIN sections s ON s.id = sp.section_id "
-            f"WHERE sp.admission_no IN ({', '.join(['%s'] * len(part))}){suffix}",
-            part,
+            f"WHERE sp.org_id = %s AND sp.admission_no IN ({', '.join(['%s'] * len(part))}){suffix}",
+            [db.org, *part],
         )
     roll_holders = db.all(
         "SELECT sp.user_id, sp.roll_no AS value, u.full_name, NULL AS class_name, NULL AS section_name "
         "FROM student_profiles sp JOIN users u ON u.id = sp.user_id "
-        f"WHERE sp.section_id = %s AND sp.roll_no IS NOT NULL{suffix}",
-        (section_id,),
+        f"WHERE sp.org_id = %s AND sp.section_id = %s AND sp.roll_no IS NOT NULL{suffix}",
+        (db.org, section_id),
     )
     holders = {"admission_no": _by_value(admission_holders), "roll_no": _by_value(roll_holders)}
 
