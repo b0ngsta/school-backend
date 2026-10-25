@@ -17,6 +17,11 @@ Files this guide uses (all in the repo root):
 
 ---
 
+> Deploying on **Render** (or any host without a persistent disk)? Set
+> `STORAGE_BACKEND=s3` with a bucket before anyone uploads files, or uploads
+> vanish on every deploy/restart/sleep — steps in `docs/OPERATIONS.md`,
+> "Hosting without a persistent disk".
+
 > Deploying free on Oracle Cloud? Follow **`DEPLOY_ORACLE.md`** instead — it
 > wraps steps 2-5 below into one script. This file is the generic/paid-VPS path.
 

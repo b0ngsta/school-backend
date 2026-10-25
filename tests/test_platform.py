@@ -177,7 +177,7 @@ def test_school_changes_name_the_operator(client, actor, recorded):
 
 def test_system_status(client):
     s = _ok(client.get("/platform/system", headers=PLATFORM))
-    assert s["database"]["migration"] == "0011_student_portal"
+    assert s["database"]["migration"] == "0012_driver_routine"
     assert s["database"]["ping_ms"] >= 0 and s["database"]["size_bytes"] > 0
     assert s["database"]["tables"] and all(t["bytes"] >= 0 for t in s["database"]["tables"])
     assert s["settings"]["default_org_code"] == "DEFAULT"

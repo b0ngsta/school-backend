@@ -104,6 +104,12 @@ class Settings:
         return self.env == "production"
 
 
+def ephemeral_disk() -> bool:
+    """True on hosts where files written to the container's disk do not survive a
+    restart: Render sets RENDER=true in every service; EPHEMERAL_DISK=true marks others."""
+    return env_bool("RENDER", False) or env_bool("EPHEMERAL_DISK", False)
+
+
 def load_settings() -> Settings:
     env = env_str("APP_ENV", "production").lower()
     if env not in ("production", "development"):
@@ -129,6 +135,13 @@ def load_settings() -> Settings:
         raise RuntimeError("STORAGE_BACKEND must be 'local' or 's3'")
     if storage_backend == "s3" and not env_str("S3_BUCKET", ""):
         raise RuntimeError("STORAGE_BACKEND=s3 needs S3_BUCKET (and usually S3_ENDPOINT_URL and keys)")
+
+    if env == "production" and storage_backend == "local" and ephemeral_disk():
+        log.warning(
+            "STORAGE_BACKEND=local on a host whose disk is wiped on every deploy, restart and sleep (Render): "
+            "uploaded photos and PDFs WILL disappear. Set STORAGE_BACKEND=s3 with a bucket (Cloudflare R2 is "
+            "free up to 10 GB) - see docs/OPERATIONS.md, 'Hosting without a persistent disk'."
+        )
 
     log_format = env_str("LOG_FORMAT", "json" if env == "production" else "text").lower()
     if log_format not in ("json", "text"):

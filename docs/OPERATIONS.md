@@ -78,7 +78,7 @@ and attendance history grows year after year.
 | `STORAGE_BACKEND` | Where uploads live | Use when |
 |---|---|---|
 | `local` (default) | `UPLOAD_DIR` on the server (a Docker volume) | one server |
-| `s3` | an S3-compatible bucket | more than one server, or managed hosting without a persistent disk (Render free tier, etc.) |
+| `s3` | an S3-compatible bucket | more than one server, or managed hosting without a persistent disk (**Render** etc. — required there, see below) |
 
 Works with AWS S3, Cloudflare R2, OCI Object Storage (S3 compatibility API)
 and MinIO. Keep the bucket **private**; the API hands out short-lived
@@ -92,6 +92,48 @@ Moving existing uploads to a bucket:
 python -m app.cli copy-uploads-to-s3     # copies UPLOAD_DIR; safe to re-run
 # 2. restart the API; 3. after checking photos load, the local folder can be archived
 ```
+
+Check the settings any time (writes, finds and deletes one test file):
+
+```bash
+python -m app.cli check-storage      # "Storage OK: s3 (s3://school-uploads/)" or the exact error
+python -m app.cli missing-uploads    # read-only: rows whose file is not in the store (re-upload those)
+```
+
+### Hosting without a persistent disk (Render, Railway, Fly without volumes, …)
+
+On these hosts the container's disk is **thrown away on every deploy, restart
+and free-tier sleep** (Render's free plan sleeps after 15 minutes idle). With
+the default `STORAGE_BACKEND=local` an upload works, the database row keeps
+its path, and then the file itself vanishes: photos and PDFs "disappear after
+a while" and their links return 404. The database (TiDB) is not affected.
+
+Fix: keep uploads in a bucket. The app warns at startup when it sees `RENDER`
+(Render sets it) or `EPHEMERAL_DISK=true` together with local storage.
+
+Cloudflare R2 (free up to 10 GB storage, no egress fees) step by step:
+
+1. Cloudflare dashboard → R2 → *Create bucket*, e.g. `school-uploads`. Keep it private (no public access).
+2. R2 → *Manage API tokens* → *Create API token*, permission **Object Read & Write**, limited to that
+   bucket. Copy the *Access Key ID*, *Secret Access Key* and the S3 endpoint
+   `https://<account-id>.r2.cloudflarestorage.com`.
+3. Render → the API service → *Environment*, add:
+   ```
+   STORAGE_BACKEND=s3
+   S3_BUCKET=school-uploads
+   S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
+   S3_REGION=auto
+   S3_ACCESS_KEY_ID=...
+   S3_SECRET_ACCESS_KEY=...
+   ```
+   Saving redeploys the service. Nothing else changes: same database, same API
+   responses, same `uploads/...?exp=&sig=` links (they now redirect to a
+   short-lived R2 link).
+4. Optional, before step 3: run `python -m app.cli check-storage` on your own computer with the same six
+   variables to catch a typo.
+5. Files uploaded **before** the switch were already deleted by Render and cannot be recovered.
+   `python -m app.cli missing-uploads` (run anywhere with `DATABASE_URL` + the S3 variables) lists
+   which records point to them, so those photos/attachments can be uploaded again.
 
 Provider notes: R2 → `S3_ENDPOINT_URL=https://<account>.r2.cloudflarestorage.com`,
 `S3_REGION=auto`. OCI → `S3_ENDPOINT_URL=https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`,

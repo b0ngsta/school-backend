@@ -6,6 +6,8 @@
     python -m app.cli check-db                    # connection, TLS and round-trip latency
     python -m app.cli check-data                  # duplicate numbers, extra principals, missing emails
     python -m app.cli copy-uploads-to-s3          # copy UPLOAD_DIR into the S3 bucket
+    python -m app.cli check-storage               # write/read/delete a test file in the configured store
+    python -m app.cli missing-uploads             # rows whose uploaded file is not in the store (read-only)
 
 Organisations (schools):
     python -m app.cli list-orgs
@@ -24,6 +26,8 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import re
+import secrets
 import statistics
 import sys
 import time
@@ -169,6 +173,91 @@ def copy_uploads_to_s3() -> None:
           "Local files were left in place.")
 
 
+def _describe(store) -> str:
+    if store.name == "s3":
+        return f"s3://{store.bucket}/{store.prefix}"
+    return getattr(store, "root", settings.upload_dir)
+
+
+def check_storage() -> None:
+    """Write, find and delete a small test file in the configured store, so a
+    wrong bucket name or key shows up before anyone uploads a photo."""
+    from app.core.config import ephemeral_disk
+    from app.storage import get_store
+
+    store = get_store()
+    where = _describe(store)
+    key = f"_storage_check/{secrets.token_hex(8)}.txt"
+    try:
+        store.put(key, b"storage check", "text/plain")
+        found = store.exists(key)
+        store.delete(key)
+        removed = not store.exists(key)
+    except Exception as exc:  # noqa: BLE001 - report any client/credential error plainly
+        sys.exit(f"Storage check FAILED ({store.name}, {where}): {exc}")
+    if not (found and removed):
+        sys.exit(f"Storage check FAILED ({store.name}, {where}): the test file could not be "
+                 f"{'found after writing' if not found else 'deleted'}.")
+    print(f"Storage OK: {store.name} ({where}) - write, read and delete work.")
+    if store.name == "local" and ephemeral_disk():
+        print("WARNING: this host's disk is wiped on deploy/restart/sleep. Uploads will disappear; "
+              "set STORAGE_BACKEND=s3 (docs/OPERATIONS.md).")
+
+
+FILE_COLUMNS = ("photo_path", "screenshot_path", "paper_path", "file_path", "attachment_path",
+                "image_path", "logo_path", "media_path")
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def find_missing_uploads(db: Db, store) -> tuple[int, list[dict]]:
+    """Every database row that points at an uploaded file which is not in the
+    store (e.g. lost when a host wiped its disk). Read-only.
+    Returns (files checked, missing rows)."""
+    from app.core.file_urls import relative_upload_path
+
+    columns = db.all(
+        "SELECT TABLE_NAME AS t, COLUMN_NAME AS c FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND COLUMN_NAME IN (" + ", ".join(["%s"] * len(FILE_COLUMNS)) + ") "
+        "ORDER BY TABLE_NAME, COLUMN_NAME", FILE_COLUMNS)
+    with_id = {r["t"] for r in db.all(
+        "SELECT TABLE_NAME AS t FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND COLUMN_NAME = 'id'")}
+    with_org = {r["t"] for r in db.all(
+        "SELECT TABLE_NAME AS t FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND COLUMN_NAME = 'org_id'")}
+    org_codes = {o["id"]: o["code"] for o in db.all("SELECT id, code FROM organisations")}
+    existing = set(store.iter_keys())  # one listing instead of a lookup per file
+
+    checked, missing = 0, []
+    for col in columns:
+        table, column = col["t"], col["c"]
+        if table not in with_id or not (_IDENTIFIER.match(table) and _IDENTIFIER.match(column)):
+            continue
+        org = "org_id" if table in with_org else "NULL"
+        rows = db.all(f"SELECT id, {org} AS org_id, {column} AS path FROM {table} "
+                      f"WHERE {column} IS NOT NULL AND {column} <> '' ORDER BY id")
+        for r in rows:
+            checked += 1
+            key = relative_upload_path(r["path"])
+            if key is None or key not in existing:
+                missing.append({"table": table, "column": column, "id": r["id"],
+                                "school": org_codes.get(r["org_id"]), "path": r["path"]})
+    return checked, missing
+
+
+def missing_uploads(db: Db) -> None:
+    from app.storage import get_store
+
+    store = get_store()
+    checked, missing = find_missing_uploads(db, store)
+    for m in missing:
+        school = f" [{m['school']}]" if m["school"] else ""
+        print(f"{m['table']}.{m['column']} id {m['id']}{school}: {m['path']}")
+    print(f"{checked} stored file(s) referenced; {len(missing)} missing from {store.name} ({_describe(store)}).")
+    if missing:
+        print("Those files are gone; re-upload them (photos, notices, homework, papers...) from the app.")
+
+
 # ------------------------------------------------------------ organisations
 
 def list_orgs(db: Db) -> None:
@@ -203,7 +292,7 @@ ORG_COMMANDS = ("list-orgs", "create-org", "rename-org", "change-org-code", "dis
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     parser.add_argument("command", choices=sorted([*USER_COMMANDS, *ORG_COMMANDS, "check-db", "check-data",
-                                                   "copy-uploads-to-s3"]))
+                                                   "copy-uploads-to-s3", "check-storage", "missing-uploads"]))
     parser.add_argument("args", nargs="*", help="username, or school code [and name] for the *-org commands")
     parser.add_argument("--org", help="school code (default: DEFAULT_ORG_CODE)")
     parser.add_argument("--admin-username", default="admin")
@@ -221,6 +310,10 @@ def main() -> None:
             check_data(db)
         elif args.command == "copy-uploads-to-s3":
             copy_uploads_to_s3()
+        elif args.command == "check-storage":
+            check_storage()
+        elif args.command == "missing-uploads":
+            missing_uploads(db)
         elif args.command == "list-orgs":
             list_orgs(db)
         elif args.command == "create-org":

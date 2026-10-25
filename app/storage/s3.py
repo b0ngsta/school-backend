@@ -45,6 +45,11 @@ class S3Store:
                 retries={"max_attempts": 3, "mode": "standard"},
                 connect_timeout=5,
                 read_timeout=30,
+                # boto3 >= 1.36 adds CRC checksums to every upload by default; some
+                # S3-compatible stores (OCI, older R2/MinIO) reject those requests.
+                # Only send/verify them where the S3 API requires it.
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
             ),
         )
         return cls(client, s.s3_bucket, s.s3_prefix, s.s3_presign_seconds)

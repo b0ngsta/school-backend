@@ -13,7 +13,7 @@ Names say "shelfwatch" but it is a school app, not retail. **Multi-school**: one
 
 ## Organisations (multi-school) — read before touching SQL (`docs/ORGANISATIONS.md`)
 - `organisations` (id, code, name, is_active). Login/forgot/verify/reset take `org_code`; missing → `DEFAULT_ORG_CODE` (default `DEFAULT` = the pre-0009 school, org id 1). Usernames unique **per school**.
-- 30 per-school tables carry `org_id INT NOT NULL` (**no default** — an INSERT without it errors): users, classes, sections, teacher_assignments, student_profiles, attendance, fees, fee_claims, transactions, lesson_plans, notices, enquiries, exams, timetable_slots, calendar_events, holidays, leave_requests, salary_records, staff_attendance, vehicles, sms_messages, school_timings (1 row/school), substitution_requests, class_homework, audit_logs (nullable) + (0011) announcements, school_documents, messages, events, student_transport. Child tables reached via a validated parent have none (announcement_images, message_recipients, event_media).
+- 30 per-school tables carry `org_id INT NOT NULL` (**no default** — an INSERT without it errors): users, classes, sections, teacher_assignments, student_profiles, attendance, fees, fee_claims, transactions, lesson_plans, notices, enquiries, exams, timetable_slots, calendar_events, holidays, leave_requests, salary_records, staff_attendance, vehicles, sms_messages, school_timings (1 row/school), substitution_requests, class_homework, audit_logs (nullable) + (0011) announcements, school_documents, messages, events, student_transport + (0012) transport_shifts. Child tables reached via a validated parent have none (announcement_images, message_recipients, event_media, transport_shift_students).
 - Unique keys are per school (`uq_users_org_username`, `uq_classes_org_name`, `uq_holidays_org_date`, `uq_vehicles_org_vehicle_no`, `uq_calendar_events_org_title`, `uq_student_org_admission_no`, `uq_users_org_principal`, `uq_school_timings_org`).
 - `get_current_user` → `auth.authenticate` binds the request `Db` to the user's school: **services use `db.org`** (raises if unbound). Rule: every query/insert on a per-school table has `org_id = %s`; every client-supplied id is looked up with the org filter first.
 - JWT has `org` claim; disabled school → 403 login, 401 tokens/refresh. Throttle keys `"<org_id>:<username>"`; reset emails use the school name.
@@ -39,7 +39,8 @@ Seed logins (school code `DEFAULT`): admin/admin123, principal/principal123, sub
 - `core/` config, security (Argon2id, JWT, rotating refresh tokens), signed file URLs, clock (Asia/Kolkata), logging/Sentry
 - `storage/` local or S3 (R2/OCI); `mail/` SMTP or console; `services/user_import/` CSV + photo-ZIP bulk import
 - `cli.py`: `python -m app.cli set-password|revoke-sessions|list-sessions <user> [--org CODE]`, `check-db|check-data|copy-uploads-to-s3`, `list-orgs|create-org|rename-org|change-org-code|disable-org|enable-org`
-- SQLAlchemy used **only** by Alembic. Migrations: `migrations/versions/0001…0011` (`0010_platform_indexes`; latest `0011_student_portal`, additive only — see "Student portal" below); `legacy/` = old SQL v3–v8
+- SQLAlchemy used **only** by Alembic. Migrations: `migrations/versions/0001…0012` (`0010_platform_indexes`, `0011_student_portal`; latest `0012_driver_routine`, additive only — see "Driver My Routine" below); `legacy/` = old SQL v3–v8. A new head also changes the expected version in `tests/test_migrations.py` and `tests/test_platform.py` (`test_system_status`)
+- `scripts/seed_driver_routine.py` — dev demo data for the driver app: `python -m scripts.seed_driver_routine [--org DEFAULT] [--driver driver] [--vehicle "DEMO VAN 1"]` (needs students in the school; rebuilds the same demo when run again)
 - Docs: `docs/ORGANISATIONS.md`, `docs/AUTH.md`, `docs/OPERATIONS.md`, `docs/FRONTEND_README.md`, `docs/DPDP.md`; deploy: `DEPLOY.md`, `DEPLOY_ORACLE.md`
 
 ## Endpoint map (prefix → domain file in routes/ and services/)
@@ -47,7 +48,7 @@ Seed logins (school code `DEFAULT`): admin/admin123, principal/principal123, sub
 /platform/* (overview, organisations list/create/detail/PATCH, users + password/sign-out, activity, system; X-Platform-Secret) · /users (+photo, /teachers) ·
 /classes (+sections, subjects) · /students/{id} (+attendance, homework, remarks, report-cards) · /assignments (+/mine) ·
 /attendance (+stats) · /homework (+submissions; class homework) · /exams (+papers per class, results) ·
-/fees (+generate, pay, claims approve/reject) · /transactions (payments) · /enquiries (reception) · /vehicles (transport) ·
+/fees (+generate, pay, claims approve/reject) · /transactions (payments) · /enquiries (reception) · /vehicles (transport; + /{id}/shifts, routes/driver_routine.py) · /driver/routine ·
 /notices · /sms · /calendar/events · /dashboard (stats, activities, attendance-week) · /lessons (lesson plans) ·
 hr.py: /holidays, /leaves (+approve/reject), /salaries, /staff-attendance (check-in/out) ·
 /timetable (mine, week, slots) · /substitutions (availability, incoming/outgoing, accept/decline/withdraw/cancel) ·
@@ -77,6 +78,15 @@ hr.py: /holidays, /leaves (+approve/reject), /salaries, /staff-attendance (check
 - Staff keys (`staff_sections(role)`): managers notices / holidays / leaves (others' requests) / substitutions / fee_claims (pending); teacher notices / holidays / leaves (own reviewed) / substitutions / timetable (own slots) / salary; driver notices / holidays / leaves / salary. Notices you posted yourself don't count. Deletions never light a dot.
 - Tests: `tests/test_updates.py` (3); the cross-school GET sweep in `test_organisations.py` picks `/updates` up automatically.
 
+## Driver "My Routine" (migration 0012, Oct 2026) — `routes/driver_routine.py` + `services/driver_routine.py` + `models/driver_routine.py`
+- Feeds the mobile app's driver-only **My Routine** screen: a driver's shifts for one day, each with its students in stop order.
+- Tables (0012, additive): `transport_shifts` (org_id, vehicle_id, name, `trip_type` pickup|drop, start/end TIME, `weekdays` "0,1,2,3,4,5" Mon=0…Sun=6, is_active) and `transport_shift_students` (shift_id + student_id PK, stop_order, stop_time, stop_name, landmark, latitude/longitude DECIMAL(9,6), notes; no org_id — reached through the shift).
+- `GET /driver/routine?date=` (role `driver` only, others 403; default today in school time) → `{date, weekday, is_today, server_time, holiday, vehicles, shifts: [{key, id, name, trip_type, start_time, end_time, weekdays, is_active, vehicle{…}, student_count, students: [{student_id, full_name, photo_path, class_name, section_name, roll_no, stop_no, stop_time, stop_name, address, landmark, latitude, longitude, notes, father_name, mother_name, guardian_phone, student_phone}]}]}`. ONE call for the whole day (≈ 4 shifts × 25 students, ~40 KB): one round trip on Render cold starts and the app's GET cache keeps it offline. Only vehicles with `driver_id` = the caller; only active shifts that run on that weekday; a holiday (holidays table) → `shifts: []` + `holiday` name. Fixed number of queries (vehicles, holiday, shifts, students IN (…), legacy riders) — no N+1.
+- Reuse: address / father / mother / guardian_phone / class from `student_profiles`, name / photo / own phone from `users`, `stop_name` falls back to `student_transport.stop_name`. **Pre-0012 fallback**: a vehicle with NO transport_shifts rows (active or not) is shown as its one `vehicles.shift_*` shift (`id: null`, `key: "v<id>"`, pickup if it starts before 12:00 else drop; stop_time = pickup_time / drop_time) with its `student_transport` riders. Once any shift exists the fallback is gone.
+- Managers (MANAGERS): `GET/POST /vehicles/{id}/shifts`, `PUT/DELETE /vehicles/{id}/shifts/{shift_id}`, `PUT /vehicles/{id}/shifts/{shift_id}/students` `{students: [...]}` replaces the list (order = stop order; duplicates 400, non-students / other schools 404, end ≤ start 400). No web-admin screen yet (web repo) — use Swagger or the seed script.
+- Phones and addresses are only returned (the access log has method/path/status only).
+- Tests: `tests/test_driver_routine.py` (6: grouping + order + weekdays + other driver, roles, pre-0012 fallback, holiday, manager validation, cross-school).
+
 ## Conventions
 Dates `YYYY-MM-DD`, times 24h `HH:MM` local, weekday Mon=0…Sat=5. Lists: `?limit=&offset=` + `X-Total-Count` header.
 Errors 400/403/404/409/422/429 with `{"detail"}`. Access JWT 15 min (set 1440 for clients without refresh), refresh 30d idle/180d max.
@@ -85,7 +95,7 @@ Errors 400/403/404/409/422/429 with `{"detail"}`. Access JWT 15 min (set 1440 fo
 ```
 cp .env.example .env && source venv/bin/activate && pip install -r requirements.txt
 alembic upgrade head && uvicorn app.main:app --reload      # Swagger /docs in dev; local MySQL without TLS: DB_SSL_CA=""
-TEST_DATABASE_URL=mysql+pymysql://root:pass@127.0.0.1:3306/school_test pytest   # real MySQL; 186 tests
+TEST_DATABASE_URL=mysql+pymysql://root:pass@127.0.0.1:3306/school_test pytest   # real MySQL; 192 tests
 # tests/test_organisations.py: two schools, same names; sweeps every GET endpoint per role + cross-school ids → 404
 # tests/test_platform.py: /platform/* totals, alerts, detail isolation, paging/search, password/sign-out, audit, secret
 ruff check .   # py311, line 120
@@ -96,4 +106,4 @@ DEFAULT_ORG_CODE (school for requests without org_code; "" = code required), PLA
 Don't read/commit `.env` (real secrets).
 
 ## Recent work (git log)
-TiDB connection → CSV import, password reset, optimization → notifications + substitutions → **organisations / multi-school** (uncommitted: migration 0009, `db.org` scoping in every service, org-aware auth/reset/throttle/CLI, platform endpoints, tests) → **platform API for the owner portal** (uncommitted: `routes/platform.py`, `services/platform.py`, `models/platform.py`, `dependencies.platform_operator`, migration 0010, `tests/test_platform.py`; `routes/organisations.py` now only has the public lookup) → **student portal** (uncommitted, Oct 2026: migration 0011 + the services/routes listed under "Student portal"; 183 tests, ruff clean) → **`GET /updates`** for the app's red "new" dots (uncommitted, Oct 2026: `routes/updates.py`, `services/updates.py`, `tests/test_updates.py`; no migration; 186 tests, ruff clean). Push (FCM) testing guide lives in the app repo: `work/ShelfwatchPlus/docs/TESTING_PUSH_NOTIFICATIONS.md`.
+TiDB connection → CSV import, password reset, optimization → notifications + substitutions → **organisations / multi-school** (uncommitted: migration 0009, `db.org` scoping in every service, org-aware auth/reset/throttle/CLI, platform endpoints, tests) → **platform API for the owner portal** (uncommitted: `routes/platform.py`, `services/platform.py`, `models/platform.py`, `dependencies.platform_operator`, migration 0010, `tests/test_platform.py`; `routes/organisations.py` now only has the public lookup) → **student portal** (uncommitted, Oct 2026: migration 0011 + the services/routes listed under "Student portal"; 183 tests, ruff clean) → **`GET /updates`** for the app's red "new" dots (uncommitted, Oct 2026: `routes/updates.py`, `services/updates.py`, `tests/test_updates.py`; no migration; 186 tests, ruff clean) → **driver "My Routine"** (uncommitted, Oct 2026: migration 0012, `routes/driver_routine.py`, `services/driver_routine.py`, `models/driver_routine.py`, `scripts/seed_driver_routine.py`, `tests/test_driver_routine.py`; one line in `routes/__init__.py`, head version in test_migrations / test_platform; 192 tests, ruff clean). Push (FCM) testing guide lives in the app repo: `work/ShelfwatchPlus/docs/TESTING_PUSH_NOTIFICATIONS.md`.

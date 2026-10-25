@@ -101,6 +101,27 @@ def test_authenticated_downloads_stream_from_the_bucket(school, bucket):
     assert c.get(f"/lessons/files/{file_id}", headers=bearer(login(c, "student1", "studpass"))).status_code == 403
 
 
+def test_check_storage_against_the_bucket(bucket, capsys):
+    from app.cli import check_storage
+
+    client, name = bucket
+    check_storage()
+    assert "Storage OK: s3 (s3://school-uploads/school1/)" in capsys.readouterr().out
+    assert _keys(client, name) == []                                # test object removed again
+
+
+def test_client_only_sends_checksums_when_required():
+    """boto3 >= 1.36 checksums every upload by default; R2/OCI/MinIO can refuse that."""
+    from types import SimpleNamespace
+
+    s = SimpleNamespace(s3_endpoint_url="https://example.r2.cloudflarestorage.com", s3_region="auto",
+                        s3_access_key_id="k", s3_secret_access_key="s", s3_addressing_style="path",
+                        s3_bucket="b", s3_prefix="", s3_presign_seconds=900)
+    config = S3Store.from_settings(s).client.meta.config
+    assert config.request_checksum_calculation == "when_required"
+    assert config.response_checksum_validation == "when_required"
+
+
 def test_copying_existing_uploads_to_the_bucket(tmp_path, bucket):
     from app.cli import copy_uploads
     from app.storage.local import LocalStore
