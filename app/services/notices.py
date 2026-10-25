@@ -1,11 +1,14 @@
-"""Notices — posted by admin/principal, visible to all staff."""
+"""Notices — posted by managers, visible to all staff and to parents.
+Optional attachment (PDF or photo, see services/attachments.py)."""
 from __future__ import annotations
+
+from fastapi import UploadFile
 
 from app.core.errors import NotFound
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.notices import NoticeCreate
-from app.services import notify, pagination
+from app.services import attachments, notify, pagination, storage
 
 
 def create_notice(db: Db, actor: CurrentUser, body: NoticeCreate) -> dict:
@@ -41,6 +44,35 @@ def list_notices(db: Db, page: pagination.Page | None = None) -> pagination.Page
 
 
 def delete_notice(db: Db, notice_id: int) -> dict:
-    if db.execute("DELETE FROM notices WHERE id = %s AND org_id = %s", (notice_id, db.org)).rowcount == 0:
-        raise NotFound("Notice not found")
+    with db.transaction():
+        notice = _lock(db, notice_id)
+        db.execute("DELETE FROM notices WHERE id = %s", (notice_id,))
+        storage.delete_after_commit(db, notice["attachment_path"])
     return {"deleted": notice_id}
+
+
+def _lock(db: Db, notice_id: int) -> dict:
+    notice = db.one("SELECT id, attachment_path FROM notices WHERE id = %s AND org_id = %s FOR UPDATE",
+                    (notice_id, db.org))
+    if not notice:
+        raise NotFound("Notice not found")
+    return notice
+
+
+def attach(db: Db, actor: CurrentUser, notice_id: int, file: UploadFile) -> dict:
+    with db.transaction():
+        notice = _lock(db, notice_id)
+        att = attachments.save(db, file, "notices", default_name="notice")
+        db.execute("UPDATE notices SET attachment_path = %s, attachment_name = %s, attachment_type = %s "
+                   "WHERE id = %s", (*att.columns(), notice_id))
+        storage.delete_after_commit(db, notice["attachment_path"])
+    return {"id": notice_id, "attachment_path": att.path, "attachment_name": att.name,
+            "attachment_type": att.type}
+
+
+def remove_attachment(db: Db, actor: CurrentUser, notice_id: int) -> None:
+    with db.transaction():
+        notice = _lock(db, notice_id)
+        db.execute("UPDATE notices SET attachment_path = NULL, attachment_name = NULL, attachment_type = NULL "
+                   "WHERE id = %s", (notice_id,))
+        storage.delete_after_commit(db, notice["attachment_path"])

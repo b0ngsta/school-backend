@@ -124,6 +124,28 @@ class Filled:
                                 data={"method": "upi", "note": f"{mark} proof"},
                                 files={"file": ("proof.png", _png(), "image/png")}), 201)["id"]
 
+        # student-portal features (migration 0011)
+        _ok(c.put("/school", headers=a, json={"director_name": f"{mark} Director"}))
+        self.announcement = post("/announcements", {"title": f"{mark} announcement"})["id"]
+        _ok(c.post(f"/announcements/{self.announcement}/images", headers=a,
+                   files={"file": ("a.png", _png(), "image/png")}), 201)
+        _ok(c.post(f"/notices/{self.notice}/attachment", headers=a,
+                   files={"file": ("n.pdf", PDF_BYTES, "application/pdf")}))
+        _ok(c.post(f"/homework/{self.homework}/attachment", headers=t,
+                   files={"file": ("h.pdf", PDF_BYTES, "application/pdf")}))
+        self.document = _ok(c.post("/documents", headers=a, data={
+            "kind": "syllabus", "title": f"{mark} syllabus", "class_id": self.cls, "subject": f"{mark} Maths"},
+            files={"file": ("s.pdf", PDF_BYTES, "application/pdf")}), 201)["id"]
+        _ok(c.post("/documents", headers=t, data={"kind": "timetable", "title": f"{mark} timetable",
+                                                  "section_id": self.sec},
+                   files={"file": ("t.pdf", PDF_BYTES, "application/pdf")}), 201)
+        self.message = _ok(c.post("/messages", headers=t, json={
+            "title": f"{mark} message", "body": f"{mark} text", "section_id": self.sec}), 201)["id"]
+        self.school_event = post("/events", {"title": f"{mark} Annual Day", "start_date": str(school_today())})["id"]
+        _ok(c.post(f"/events/{self.school_event}/videos", headers=a, json={"url": f"https://v.example/{mark}"}), 201)
+        _ok(c.put(f"/vehicles/{self.vehicle}/students/{self.student}", headers=a,
+                  json={"stop_name": f"{mark} Stop", "pickup_time": "07:30"}))
+
 
 def _png() -> bytes:
     from helpers import png_bytes
@@ -277,13 +299,23 @@ def test_every_list_shows_only_the_own_school(client, schools):
             f"/imports/users/export?user_type=student&class_id={me.cls}&section_id={me.sec}",
             "/imports/users/export?user_type=teacher",
             "/staff-attendance?limit=50", "/fees/claims?limit=50", "/transactions?limit=50",
+            f"/vehicles/{me.vehicle}/students", f"/messages/{me.message}", f"/messages/{me.message}/recipients",
+            f"/events/{me.school_event}", "/events?status=upcoming",
+            f"/student/notices/{me.notice}", f"/student/messages/{me.message}",
+            "/student/documents?kind=timetable", "/student/documents?kind=syllabus",
+            f"/student/attendance/month?year={school_today().year}&month={school_today().month}",
+            f"/student/homework?subject={me.mark} Maths&date={school_today()}",
         ]
         seen_own = 0
         for role in (me.admin, me.t, me.s):
             pages = _sweep(client, role, extra)
             assert len(pages) > 15
-            if role is me.admin:  # every extra query is valid, so none was skipped silently
-                assert not [p for p in extra if p not in pages], [p for p in extra if p not in pages]
+            if role is me.admin:  # every staff query is valid, so none was skipped silently
+                missing = [p for p in extra if p not in pages and not p.startswith("/student/")]
+                assert not missing, missing
+            if role is me.s:  # and every parent-app query too
+                missing = [p for p in extra if p not in pages and p.startswith("/student/")]
+                assert not missing, missing
             for path, text in pages.items():
                 assert other.mark not in text, f"{path} shows the other school's data"
             seen_own += sum(me.mark in text for text in pages.values())
@@ -367,6 +399,35 @@ def test_ids_from_another_school_are_not_found(client, schools):
         c.delete(f"/lessons/{a.lesson['id']}", headers=h),
         c.post("/sms", headers=h, json={"recipient_group": f"section:{a.sec}", "message": "x"}),
         c.get(f"/imports/users/export?user_type=student&class_id={a.cls}&section_id={a.sec}", headers=h),
+        c.put(f"/announcements/{a.announcement}", headers=h, json={"title": "x"}),
+        c.delete(f"/announcements/{a.announcement}", headers=h),
+        c.post(f"/announcements/{a.announcement}/images", headers=h, files={"file": ("p.png", _png(), "image/png")}),
+        c.post(f"/notices/{a.notice}/attachment", headers=h, files={"file": ("p.png", _png(), "image/png")}),
+        c.delete(f"/notices/{a.notice}/attachment", headers=h),
+        c.post(f"/homework/{a.homework}/attachment", headers=h, files={"file": ("p.png", _png(), "image/png")}),
+        c.put(f"/documents/{a.document}", headers=h, data={"title": "x"}),
+        c.delete(f"/documents/{a.document}", headers=h),
+        c.post("/documents", headers=h, data={"kind": "syllabus", "title": "x", "class_id": a.cls, "subject": "x"},
+               files={"file": ("p.png", _png(), "image/png")}),
+        c.post("/documents", headers=h, data={"kind": "timetable", "title": "x", "section_id": a.sec},
+               files={"file": ("p.png", _png(), "image/png")}),
+        c.get(f"/messages/{a.message}", headers=h),
+        c.get(f"/messages/{a.message}/recipients", headers=h),
+        c.delete(f"/messages/{a.message}", headers=h),
+        c.post("/messages", headers=h, json={"title": "x", "body": "y", "student_ids": [a.student]}),
+        c.post("/messages", headers=h, json={"title": "x", "body": "y", "section_id": a.sec}),
+        c.post("/messages", headers=h, json={"title": "x", "body": "y", "class_id": a.cls}),
+        c.get(f"/events/{a.school_event}", headers=h),
+        c.put(f"/events/{a.school_event}", headers=h, json={"title": "x", "start_date": str(school_today())}),
+        c.delete(f"/events/{a.school_event}", headers=h),
+        c.post(f"/events/{a.school_event}/videos", headers=h, json={"url": "https://x.example"}),
+        c.get(f"/vehicles/{a.vehicle}/students", headers=h),
+        c.put(f"/vehicles/{a.vehicle}/students/{b.student}", headers=h, json={}),
+        c.put(f"/vehicles/{b.vehicle}/students/{a.student}", headers=h, json={}),
+        c.delete(f"/vehicles/{a.vehicle}/students/{a.student}", headers=h),
+        c.put("/vehicles/" + str(b.vehicle), headers=h, json={"driver_id": a.teacher}),
+        c.get(f"/student/notices/{a.notice}", headers=bearer(b.s)),
+        c.get(f"/student/messages/{a.message}", headers=bearer(b.s)),
     ]
     for r in blocked:
         assert r.status_code in (400, 403, 404), f"{r.request.method} {r.request.url}: {r.status_code} {r.text}"
@@ -378,6 +439,9 @@ def test_ids_from_another_school_are_not_found(client, schools):
     assert [r["status"] for r in _ok(c.get(f"/attendance?section_id={a.sec}&day={school_today()}",
                                            headers=a_admin))] == ["present"]
     assert len(_ok(c.get("/timetable", headers=a_admin))) == 1
+    assert _ok(c.get(f"/messages/{a.message}", headers=a_admin))["title"] == f"{ALPHA} message"
+    assert _ok(c.get(f"/vehicles/{a.vehicle}/students", headers=a_admin))[0]["student_id"] == a.student
+    assert _ok(c.get("/school", headers=a_admin))["director_name"] == f"{ALPHA} Director"
 
 
 def test_per_school_unique_rules(client, schools):

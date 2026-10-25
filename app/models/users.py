@@ -8,6 +8,7 @@ from app.models.common import PASSWORD_MAX_LENGTH, StaffType
 
 
 class TeacherInfo(BaseModel):
+    designation: str | None = Field(default=None, max_length=50, description='e.g. "TGT", "PGT"')
     subject: str | None = None
     qualification: str | None = None
     joining_date: date | None = None

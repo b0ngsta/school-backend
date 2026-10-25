@@ -11,6 +11,7 @@ the operator for the audit log.
     POST  /platform/organisations                              new school + its first admin
     GET   /platform/organisations/{code}                       one school in depth
     PATCH /platform/organisations/{code}                       rename, change code, disable / enable
+    PUT   /platform/organisations/{code}/profile               school profile (director, affiliation, contacts…)
     GET   /platform/organisations/{code}/users                 accounts (?role=&q=&active=&limit=&offset=)
     POST  /platform/organisations/{code}/users/{id}/password   set a new password (ends the user's sessions)
     POST  /platform/organisations/{code}/users/{id}/sign-out   end every session of the user
@@ -24,6 +25,7 @@ from app.dependencies import get_db, platform_operator
 from app.models.common import UserType
 from app.models.organisations import OrganisationCreate, OrganisationUpdate
 from app.models.platform import PlatformPasswordReset
+from app.models.school import SchoolProfileUpdate
 from app.services import organisations, platform
 
 router = APIRouter(prefix="/platform", tags=["platform"], dependencies=[Depends(platform_operator)])
@@ -59,6 +61,13 @@ def school_detail(code: str, db: Db = Depends(get_db)):
 def update_school(code: str, body: OrganisationUpdate, db: Db = Depends(get_db),
                   operator: str | None = Depends(platform_operator)):
     return organisations.update(db, code, body, operator)
+
+
+@router.put("/organisations/{code}/profile")
+def update_school_profile(code: str, body: SchoolProfileUpdate, db: Db = Depends(get_db),
+                          operator: str | None = Depends(platform_operator)):
+    """The school's profile shown in the apps (fields left out keep their value; "" clears)."""
+    return platform.update_profile(db, code, body, operator)
 
 
 @router.get("/organisations/{code}/users")

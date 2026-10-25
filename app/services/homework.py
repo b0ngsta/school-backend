@@ -7,18 +7,23 @@ students who join the section later see the homework automatically.
 """
 from __future__ import annotations
 
+from datetime import date
+
+from fastapi import UploadFile
+
 from app.core.clock import school_today
 from app.core.errors import BadRequest, Forbidden, NotFound, Unprocessable
 from app.core.roles import MANAGERS
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.homework import ClassHomeworkCreate, ClassHomeworkUpdate, SubmissionsUpdate
-from app.services import access, notify, pagination
+from app.services import access, attachments, notify, pagination, storage
 
 # counts are over the section's current (active) students
 HOMEWORK_SELECT = (
     "SELECT h.id, h.class_id, h.section_id, c.name AS class_name, s.name AS section_name, h.subject, "
     "h.title, h.note, h.due_date, h.created_by, u.full_name AS assigned_by, h.created_at, h.updated_at, "
+    "h.attachment_path, h.attachment_name, h.attachment_type, "
     "(SELECT COUNT(*) FROM student_profiles sp JOIN users su ON su.id = sp.user_id AND su.is_active = 1 "
     " WHERE sp.section_id = h.section_id) AS count_total, "
     "(SELECT COUNT(*) FROM homework_submissions hs JOIN student_profiles sp ON sp.user_id = hs.student_id "
@@ -148,8 +153,30 @@ def update_homework(db: Db, user: CurrentUser, homework_id: int, body: ClassHome
 
 
 def delete_homework(db: Db, user: CurrentUser, homework_id: int) -> None:
-    _editable(db, user, homework_id)
-    db.execute("DELETE FROM class_homework WHERE id = %s", (homework_id,))
+    with db.transaction():
+        hw = _editable(db, user, homework_id)
+        db.execute("DELETE FROM class_homework WHERE id = %s", (homework_id,))
+        storage.delete_after_commit(db, hw["attachment_path"])
+
+
+def attach(db: Db, user: CurrentUser, homework_id: int, file: UploadFile) -> dict:
+    """Add or replace the homework sheet (PDF or photo) — same rights as editing."""
+    with db.transaction():
+        db.one("SELECT id FROM class_homework WHERE id = %s AND org_id = %s FOR UPDATE", (homework_id, db.org))
+        hw = _editable(db, user, homework_id)
+        att = attachments.save(db, file, "homework", default_name="homework")
+        db.execute("UPDATE class_homework SET attachment_path = %s, attachment_name = %s, attachment_type = %s "
+                   "WHERE id = %s", (*att.columns(), homework_id))
+        storage.delete_after_commit(db, hw["attachment_path"])
+    return _get(db, homework_id)
+
+
+def remove_attachment(db: Db, user: CurrentUser, homework_id: int) -> None:
+    with db.transaction():
+        hw = _editable(db, user, homework_id)
+        db.execute("UPDATE class_homework SET attachment_path = NULL, attachment_name = NULL, "
+                   "attachment_type = NULL WHERE id = %s", (homework_id,))
+        storage.delete_after_commit(db, hw["attachment_path"])
 
 
 # ------------------------------------------------------------ submissions
@@ -192,20 +219,69 @@ def student_homework_sql(columns: str) -> str:
         f"SELECT {columns} FROM ("
         "SELECT h.id, %s AS student_id, h.title, h.due_date, COALESCE(hs.status, 'pending') AS status, h.note, "
         "h.created_by, h.created_at, h.updated_at, u.full_name AS created_by_name, h.subject, "
-        "'class' AS scope, h.id AS homework_id "
+        "'class' AS scope, h.id AS homework_id, h.attachment_path, h.attachment_name, h.attachment_type "
         "FROM class_homework h "
         "JOIN student_profiles sp ON sp.section_id = h.section_id AND sp.class_id = h.class_id AND sp.user_id = %s "
         "JOIN users u ON u.id = h.created_by "
         "LEFT JOIN homework_submissions hs ON hs.homework_id = h.id AND hs.student_id = sp.user_id "
         "UNION ALL "
         "SELECT hw.id, hw.student_id, hw.title, hw.due_date, hw.status, hw.note, hw.created_by, hw.created_at, "
-        "hw.updated_at, u.full_name AS created_by_name, NULL AS subject, 'student' AS scope, NULL AS homework_id "
+        "hw.updated_at, u.full_name AS created_by_name, NULL AS subject, 'student' AS scope, NULL AS homework_id, "
+        "NULL AS attachment_path, NULL AS attachment_name, NULL AS attachment_type "
         "FROM homeworks hw JOIN users u ON u.id = hw.created_by WHERE hw.student_id = %s"
         ") AS hw"
     )
 
 
 HOMEWORK_ORDER = "hw.created_at DESC, hw.scope, hw.id DESC"
+GENERAL_SUBJECT = "General"  # the subject shown for homework that names none
+
+
+def student_homework_filters(given_on: date | None, subject: str | None) -> tuple[str, list]:
+    """WHERE clause (on the merged rows of `student_homework_sql`) for the
+    student app's filters: the day the homework was given, and the subject
+    (case-insensitive; "General" = homework without a subject)."""
+    where, params = [], []
+    if given_on is not None:
+        where.append("hw.created_at >= %s AND hw.created_at < %s + INTERVAL 1 DAY")
+        params += [given_on, given_on]
+    if subject is not None:
+        subject = subject.strip()
+        if subject.lower() == GENERAL_SUBJECT.lower():
+            where.append("(hw.subject IS NULL OR TRIM(hw.subject) = '')")
+        else:
+            where.append("LOWER(TRIM(hw.subject)) = LOWER(%s)")
+            params.append(subject)
+    return (" WHERE " + " AND ".join(where)) if where else "", params
+
+
+
+def subjects_for_student(db: Db, student_id: int) -> list[dict]:
+    """The subjects of the student's class (class order), each with how much
+    class homework it has and the day the latest was given; subjects named
+    only on homework follow; homework without a subject is "General"."""
+    me = db.one("SELECT class_id, section_id FROM student_profiles WHERE user_id = %s AND org_id = %s",
+                (student_id, db.org)) or {}
+    subjects = [r["name"] for r in db.all(
+        "SELECT cs.name FROM class_subjects cs JOIN classes c ON c.id = cs.class_id "
+        "WHERE cs.class_id = %s AND c.org_id = %s ORDER BY cs.id", (me.get("class_id"), db.org))]
+    stats = db.all(
+        "SELECT COALESCE(NULLIF(TRIM(h.subject), ''), %s) AS subject, COUNT(*) AS count, "
+        "MAX(h.created_at) AS last_given FROM class_homework h "
+        "WHERE h.org_id = %s AND h.section_id <=> %s AND h.class_id <=> %s "
+        "GROUP BY COALESCE(NULLIF(TRIM(h.subject), ''), %s)",
+        (GENERAL_SUBJECT, db.org, me.get("section_id"), me.get("class_id"), GENERAL_SUBJECT),
+    )
+    out: dict[str, dict] = {}
+    for name in subjects:
+        out.setdefault(name.strip().lower(), {"subject": name.strip(), "count": 0, "last_given": None})
+    for row in stats:
+        entry = out.setdefault(row["subject"].lower(), {"subject": row["subject"], "count": 0, "last_given": None})
+        entry["count"] += int(row["count"])
+        if row["last_given"] and (entry["last_given"] is None or row["last_given"] > entry["last_given"]):
+            entry["last_given"] = row["last_given"]
+    general = out.pop(GENERAL_SUBJECT.lower(), None)
+    return list(out.values()) + ([general] if general else [])
 
 
 def class_homework_for_student(db: Db, student_id: int, homework_id: int) -> dict | None:

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 class AttendanceRecord(BaseModel):
     student_id: int
-    status: Literal["present", "absent", "leave"]
+    status: Literal["present", "absent", "leave", "half_day"]
 
 
 class AttendanceMark(BaseModel):

@@ -45,9 +45,9 @@ def create_staff(db: Db, actor: CurrentUser, body: StaffCreate) -> dict:
         if body.user_type == "teacher":
             info = body.teacher_info or TeacherInfoUpdate()
             db.execute(
-                "INSERT INTO teacher_profiles (user_id, subject, qualification, joining_date, address) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (user_id, info.subject, info.qualification, info.joining_date, info.address),
+                "INSERT INTO teacher_profiles (user_id, designation, subject, qualification, joining_date, address) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (user_id, info.designation, info.subject, info.qualification, info.joining_date, info.address),
             )
         audit.record(db, actor, "user.create", "user", user_id,
                      {"username": body.username, "user_type": body.user_type})
@@ -131,7 +131,7 @@ def upload_photo(db: Db, actor: CurrentUser, user_id: int, file: UploadFile) -> 
 def list_teachers(db: Db) -> list[dict]:
     return db.all(
         "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.photo_path, u.is_active, "
-        "t.subject, t.qualification, t.joining_date, t.address, "
+        "t.designation, t.subject, t.qualification, t.joining_date, t.address, "
         "(SELECT COUNT(*) FROM lesson_plans lp WHERE lp.teacher_id = u.id) AS lesson_plan_count "
         "FROM users u LEFT JOIN teacher_profiles t ON t.user_id = u.id "
         "WHERE u.org_id = %s AND u.user_type = 'teacher' ORDER BY u.full_name",
@@ -146,17 +146,19 @@ def update_teacher_info(db: Db, user_id: int, body: TeacherInfoUpdate) -> dict:
                       (user_id, db.org)):
             raise NotFound("Teacher not found")
         current = db.one(
-            "SELECT subject, qualification, joining_date, address FROM teacher_profiles "
+            "SELECT designation, subject, qualification, joining_date, address FROM teacher_profiles "
             "WHERE user_id = %s FOR UPDATE",
             (user_id,),
         ) or {}
-        merged = {**{k: current.get(k) for k in ("subject", "qualification", "joining_date", "address")},
+        merged = {**{k: current.get(k) for k in ("designation", "subject", "qualification", "joining_date",
+                                                  "address")},
                   **body.model_dump(exclude_unset=True)}
         db.execute(
-            "INSERT INTO teacher_profiles (user_id, subject, qualification, joining_date, address) "
-            "VALUES (%s, %s, %s, %s, %s) "
-            "ON DUPLICATE KEY UPDATE subject = VALUES(subject), qualification = VALUES(qualification), "
-            "joining_date = VALUES(joining_date), address = VALUES(address)",
-            (user_id, merged["subject"], merged["qualification"], merged["joining_date"], merged["address"]),
+            "INSERT INTO teacher_profiles (user_id, designation, subject, qualification, joining_date, address) "
+            "VALUES (%s, %s, %s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE designation = VALUES(designation), subject = VALUES(subject), "
+            "qualification = VALUES(qualification), joining_date = VALUES(joining_date), address = VALUES(address)",
+            (user_id, merged["designation"], merged["subject"], merged["qualification"], merged["joining_date"],
+             merged["address"]),
         )
     return {"updated": user_id}

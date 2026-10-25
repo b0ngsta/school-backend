@@ -1,7 +1,8 @@
 """Signed, expiring links for uploaded files.
 
 Uploaded files are never served publicly. Wherever an API response contains
-a stored file path (photo_path, screenshot_path, paper_path) it is replaced
+a stored file path (photo_path, screenshot_path, paper_path, attachment_path,
+image_path, logo_path, media_path) it is replaced
 with a link of the same form as before plus a signature:
 
     uploads/photos/ab12….jpg?exp=1791234567&sig=Q2x…
@@ -22,7 +23,10 @@ from app.core.config import settings
 from app.core.security import sign_file_path, verify_file_signature
 
 URL_PREFIX = "uploads"
-FILE_FIELDS = frozenset({"photo_path", "screenshot_path", "paper_path", "requester_photo", "substitute_photo"})
+FILE_FIELDS = frozenset({
+    "photo_path", "screenshot_path", "paper_path", "requester_photo", "substitute_photo",
+    "attachment_path", "image_path", "logo_path", "media_path", "driver_photo",
+})
 
 _UPLOAD_ROOT = os.path.abspath(settings.upload_dir)
 

@@ -5,11 +5,15 @@ client, so a student can only ever see their own data.
 """
 from __future__ import annotations
 
+from datetime import date
+
+from app.core.errors import NotFound
 from app.db import Db
 from app.services import homework as class_homework
 from app.services import pagination
 from app.services.calendar import get_calendar_payload
 from app.services.hr import list_holidays
+from app.services.school_profile import session_bounds, session_label
 
 
 def profile(db: Db, uid: int) -> dict | None:
@@ -48,7 +52,8 @@ def _attendance_summary(db: Db, uid: int) -> dict:
 
 
 def dashboard(db: Db, uid: int) -> dict:
-    """Everything on the student home screen in four round trips (was six)."""
+    """Everything on the student home screen in five round trips (incl. the school's name,
+    logo and current session for the header)."""
     me = profile(db, uid)
     counts = db.one(
         "SELECT "
@@ -88,8 +93,12 @@ def dashboard(db: Db, uid: int) -> dict:
         "ORDER BY n.created_at DESC LIMIT 3",
         (db.org,),
     )
+    school = db.one("SELECT name, code, logo_path, session_start_month FROM organisations WHERE id = %s", (db.org,))
+    start, end = session_bounds(int(school.pop("session_start_month") or 4))
+    school["session"] = session_label(start, end)
     return {
         "profile": me,
+        "school": school,
         "pending_homework": counts["pending_homework"],
         "attendance": attendance_summary,
         "next_exam": next_exam,
@@ -98,19 +107,26 @@ def dashboard(db: Db, uid: int) -> dict:
     }
 
 
-def homework(db: Db, uid: int, page: pagination.Page | None = None) -> pagination.PageResult:
+def homework(db: Db, uid: int, page: pagination.Page | None = None, given_on: date | None = None,
+             subject: str | None = None) -> pagination.PageResult:
     """Class homework of the student's section merged with per-student rows
-    (`scope` "class" | "student"; clients key rows by scope + id)."""
+    (`scope` "class" | "student"; clients key rows by scope + id).
+    Optional filters: the day it was given, the subject ("General" = none)."""
+    where, params = class_homework.student_homework_filters(given_on, subject)
     return pagination.fetch(
         db,
         class_homework.student_homework_sql(
             "hw.id, hw.title, hw.due_date, hw.status, hw.note, hw.created_at, hw.created_by_name AS assigned_by, "
-            "hw.subject, hw.scope, hw.homework_id"
-        ),
-        (uid, uid, uid),
+            "hw.subject, hw.scope, hw.homework_id, hw.attachment_path, hw.attachment_name, hw.attachment_type"
+        ) + where,
+        (uid, uid, uid, *params),
         class_homework.HOMEWORK_ORDER,
         page,
     )
+
+
+def homework_subjects(db: Db, uid: int) -> list[dict]:
+    return class_homework.subjects_for_student(db, uid)
 
 
 def remarks(db: Db, uid: int) -> list[dict]:
@@ -211,12 +227,45 @@ def calendar(db: Db) -> dict:
     return get_calendar_payload(db)
 
 
+_NOTICE_SELECT = (
+    "SELECT n.id, n.title, n.body, n.created_at, u.full_name AS posted_by, "
+    "n.attachment_path, n.attachment_name, n.attachment_type "
+    "FROM notices n JOIN users u ON u.id = n.created_by WHERE n.org_id = %s"
+)
+
+
 def notices(db: Db, page: pagination.Page | None = None) -> pagination.PageResult:
-    return pagination.fetch(
-        db,
-        "SELECT n.id, n.title, n.body, n.created_at, u.full_name AS posted_by "
-        "FROM notices n JOIN users u ON u.id = n.created_by WHERE n.org_id = %s",
-        (db.org,),
-        "n.created_at DESC, n.id DESC",
-        page,
+    return pagination.fetch(db, _NOTICE_SELECT, (db.org,), "n.created_at DESC, n.id DESC", page)
+
+
+def notice(db: Db, notice_id: int) -> dict:
+    row = db.one(_NOTICE_SELECT + " AND n.id = %s", (db.org, notice_id))
+    if not row:
+        raise NotFound("Notice not found")
+    return row
+
+
+def teachers(db: Db, uid: int) -> list[dict]:
+    """The teachers of the student's section, each once, with the subjects
+    they teach it (the class teacher first)."""
+    me = profile(db, uid)
+    if not me or not me["section_id"]:
+        return []
+    rows = db.all(
+        "SELECT u.id, u.full_name, u.email, u.photo_path, tp.designation, tp.qualification, ta.role, ta.subject "
+        "FROM teacher_assignments ta JOIN users u ON u.id = ta.teacher_id AND u.is_active = 1 "
+        "LEFT JOIN teacher_profiles tp ON tp.user_id = u.id "
+        "WHERE ta.org_id = %s AND ta.section_id = %s ORDER BY u.full_name, ta.id",
+        (db.org, me["section_id"]),
     )
+    out: dict[int, dict] = {}
+    for r in rows:
+        t = out.setdefault(r["id"], {k: r[k] for k in ("id", "full_name", "email", "photo_path", "designation",
+                                                        "qualification")} | {"subjects": [],
+                                                                             "is_class_teacher": False})
+        if r["role"] == "class_teacher":
+            t["is_class_teacher"] = True
+        subject = (r["subject"] or "").strip()
+        if subject and subject not in t["subjects"]:
+            t["subjects"].append(subject)
+    return sorted(out.values(), key=lambda t: (not t["is_class_teacher"], t["full_name"].lower()))

@@ -22,6 +22,7 @@ def stats(db: Db, day: date | None) -> dict:
         "SUM(status='present') AS present, "
         "SUM(status='absent') AS absent, "
         "SUM(status='leave') AS on_leave, "
+        "SUM(status='half_day') AS half_day, "
         "COUNT(*) AS marked "
         "FROM attendance WHERE org_id = %s AND date = %s",
         (db.org, day or school_today()),
@@ -31,6 +32,7 @@ def stats(db: Db, day: date | None) -> dict:
         "present": present,
         "absent": int(row["absent"] or 0),
         "on_leave": int(row["on_leave"] or 0),
+        "half_day": int(row["half_day"] or 0),
         "marked": marked,
         "percentage": round(present / marked * 100, 1) if marked else 0.0,
     }
@@ -74,6 +76,9 @@ def mark_attendance(db: Db, user: CurrentUser, body: AttendanceMark) -> dict:
     return {"marked": len(body.records), "date": str(body.date)}
 
 
+_STATUS_WORDS = {"leave": "on leave", "half_day": "marked half day"}
+
+
 def _statuses(db: Db, day: date, student_ids: list[int]) -> dict[int, str]:
     if not student_ids:
         return {}
@@ -99,11 +104,13 @@ def _notify_parents(db: Db, body: AttendanceMark, previous: dict[int, str]) -> N
     for student_id, status in changed.items():
         name = names.get(student_id, "Your child")
         if student_id in previous:
-            title = f"Attendance updated: {name} is now {'on leave' if status == 'leave' else status}"
+            title = f"Attendance updated: {name} is now {_STATUS_WORDS.get(status, status)}"
             if not today:
                 title += f" ({notify.day_month(body.date)})"
         elif status == "present":
             title = f"✅ {name} is present today" if today else f"✅ {name} was present {when}"
+        elif status == "half_day":
+            title = f"🕐 {name} attended half the day {when}" + (f" ({notify.day_month(body.date)})" if today else "")
         elif status == "absent":
             title = f"⚠️ {name} was marked absent {when}" + (f" ({notify.day_month(body.date)})" if today else "")
         else:

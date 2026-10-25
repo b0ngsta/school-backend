@@ -34,7 +34,8 @@ from app.core.errors import NotFound
 from app.core.roles import MANAGERS
 from app.db import Db
 from app.models.platform import PlatformPasswordReset
-from app.services import audit, dashboard, organisations, sessions
+from app.models.school import SchoolProfileUpdate
+from app.services import audit, dashboard, organisations, school_profile, sessions
 from app.services import auth as auth_service
 
 TREND_DAYS = 14
@@ -126,6 +127,23 @@ def _org_public(org: dict) -> dict:
         "created_at": _school_iso(org["created_at"]),
         "updated_at": _school_iso(org["updated_at"]),
     }
+
+
+def _profile(db: Db, org_id: int) -> dict:
+    """The school's own profile (School Info screen in the apps)."""
+    row = school_profile.get_profile(db, org_id)
+    session = row.pop("session")
+    for key in ("id", "code", "name"):
+        row.pop(key, None)
+    row["session"] = {"label": session["label"], "start": str(session["start"]), "end": str(session["end"])}
+    return row
+
+
+def update_profile(db: Db, code: str, body: SchoolProfileUpdate, operator: str | None) -> dict:
+    org = _org(db, code)
+    db.bind_org(org["id"])
+    school_profile.update_profile(db, None, body, org["id"], operator)
+    return _profile(db, org["id"])
 
 
 def _trend_days() -> list[date]:
@@ -431,6 +449,7 @@ def school_detail(db: Db, code: str) -> dict:
                      "active": _int(roles.get(role, {}).get("active"))} for role in ROLES}
     return {
         "organisation": _org_public(org),
+        "profile": _profile(db, oid),
         "today": str(w.today),
         "people": {
             "by_role": people,

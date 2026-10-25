@@ -13,7 +13,7 @@ Names say "shelfwatch" but it is a school app, not retail. **Multi-school**: one
 
 ## Organisations (multi-school) — read before touching SQL (`docs/ORGANISATIONS.md`)
 - `organisations` (id, code, name, is_active). Login/forgot/verify/reset take `org_code`; missing → `DEFAULT_ORG_CODE` (default `DEFAULT` = the pre-0009 school, org id 1). Usernames unique **per school**.
-- 25 per-school tables carry `org_id INT NOT NULL` (**no default** — an INSERT without it errors): users, classes, sections, teacher_assignments, student_profiles, attendance, fees, fee_claims, transactions, lesson_plans, notices, enquiries, exams, timetable_slots, calendar_events, holidays, leave_requests, salary_records, staff_attendance, vehicles, sms_messages, school_timings (1 row/school), substitution_requests, class_homework, audit_logs (nullable). Child tables reached via a validated parent have none.
+- 30 per-school tables carry `org_id INT NOT NULL` (**no default** — an INSERT without it errors): users, classes, sections, teacher_assignments, student_profiles, attendance, fees, fee_claims, transactions, lesson_plans, notices, enquiries, exams, timetable_slots, calendar_events, holidays, leave_requests, salary_records, staff_attendance, vehicles, sms_messages, school_timings (1 row/school), substitution_requests, class_homework, audit_logs (nullable) + (0011) announcements, school_documents, messages, events, student_transport. Child tables reached via a validated parent have none (announcement_images, message_recipients, event_media).
 - Unique keys are per school (`uq_users_org_username`, `uq_classes_org_name`, `uq_holidays_org_date`, `uq_vehicles_org_vehicle_no`, `uq_calendar_events_org_title`, `uq_student_org_admission_no`, `uq_users_org_principal`, `uq_school_timings_org`).
 - `get_current_user` → `auth.authenticate` binds the request `Db` to the user's school: **services use `db.org`** (raises if unbound). Rule: every query/insert on a per-school table has `org_id = %s`; every client-supplied id is looked up with the org filter first.
 - JWT has `org` claim; disabled school → 403 login, 401 tokens/refresh. Throttle keys `"<org_id>:<username>"`; reset emails use the school name.
@@ -39,7 +39,7 @@ Seed logins (school code `DEFAULT`): admin/admin123, principal/principal123, sub
 - `core/` config, security (Argon2id, JWT, rotating refresh tokens), signed file URLs, clock (Asia/Kolkata), logging/Sentry
 - `storage/` local or S3 (R2/OCI); `mail/` SMTP or console; `services/user_import/` CSV + photo-ZIP bulk import
 - `cli.py`: `python -m app.cli set-password|revoke-sessions|list-sessions <user> [--org CODE]`, `check-db|check-data|copy-uploads-to-s3`, `list-orgs|create-org|rename-org|change-org-code|disable-org|enable-org`
-- SQLAlchemy used **only** by Alembic. Migrations: `migrations/versions/0001…0010` (latest `0010_platform_indexes`: `auth_sessions(last_used_at)`, `staff_attendance(date, org_id)`); `legacy/` = old SQL v3–v8
+- SQLAlchemy used **only** by Alembic. Migrations: `migrations/versions/0001…0011` (`0010_platform_indexes`; latest `0011_student_portal`, additive only — see "Student portal" below); `legacy/` = old SQL v3–v8
 - Docs: `docs/ORGANISATIONS.md`, `docs/AUTH.md`, `docs/OPERATIONS.md`, `docs/FRONTEND_README.md`, `docs/DPDP.md`; deploy: `DEPLOY.md`, `DEPLOY_ORACLE.md`
 
 ## Endpoint map (prefix → domain file in routes/ and services/)
@@ -52,7 +52,23 @@ Seed logins (school code `DEFAULT`): admin/admin123, principal/principal123, sub
 hr.py: /holidays, /leaves (+approve/reject), /salaries, /staff-attendance (check-in/out) ·
 /timetable (mine, week, slots) · /substitutions (availability, incoming/outgoing, accept/decline/withdraw/cancel) ·
 /settings/school-timings · /notifications (+unread-count, read) + /devices (FCM tokens) · /imports/users (columns, template, export) ·
-/student/* (parent portal, "me"-scoped) · /internal/jobs/fee-reminders (X-Jobs-Secret; all schools)
+/student/* (parent portal, "me"-scoped) · /internal/jobs/fee-reminders (X-Jobs-Secret; all schools) ·
+/school (+logo) · /announcements (+images) · /documents · /messages (+recipients, attachment) · /events (+photos, videos, media)
+
+## Student portal (migration 0011, Oct 2026) — feeds the parent app's portal screens
+- **Files on records**: `services/attachments.py` (PDF or JPEG/PNG/WebP, 15 MB) → columns `attachment_path / attachment_name / attachment_type ('pdf'|'image')` on notices, class_homework, messages, school_documents. Signed on the way out: `core/file_urls.FILE_FIELDS` now also has `attachment_path, image_path, logo_path, media_path, driver_photo`. Upload endpoints are separate `POST …/{id}/attachment` (create stays JSON); documents are multipart in one call.
+- **School profile** `services/school_profile.py`: organisations + logo_path, director_name, principal_name (falls back to the principal account), affiliation_no, phone, tel, email, website, address, `session_start_month` (default 4). `session_bounds()/session_label()` = academic session (`2026-2027`). `GET /school` any user · `PUT /school` + `POST/DELETE /school/logo` admin/principal · owner portal `PUT /platform/organisations/{code}/profile` (+ `profile` in the platform detail). `/student/dashboard` now carries `school {name, code, logo_path, session}`.
+- **Announcements** (app-launch popup): managers CRUD `/announcements` (+ ≤5 images); students `GET /student/announcements` = active + within starts_on/ends_on (max 10).
+- **Attendance**: status ENUM gained `half_day` (marking: web + staff app "H"; parent push "attended half the day"). `services/student_attendance.py`: `GET /student/attendance/overview` (session totals + months up to now) and `/student/attendance/month?year=&month=` (each day: present/absent/leave/half_day/holiday/sunday/not_marked). Working days = days − Sundays − holidays on other days; % over ALL working days of the month/session (future days too — the school's choice), half day = ½.
+- **Homework**: `/student/homework?date=&subject=` (subject "General" = none) and `/student/homework/subjects` (class subjects + count + last_given). `POST/DELETE /homework/{id}/attachment` (setter or managers).
+- **Documents** `services/documents.py`, table `school_documents` kind timetable|syllabus, target school / class / section, subject (required for syllabus). Upload: managers; timetable = class teacher of the section; syllabus = teacher assigned to the class. Edit/delete: uploader or managers. Students: `/student/documents?kind=` and `/student/syllabus` (grouped by class subject).
+- **Notices**: posting is now any MANAGER (was admin/principal); `/student/notices/{id}`.
+- **Messages** `services/messages.py`: managers → students / section / class / whole school; class teachers → their own section(s) or its students. Per-recipient read state (`message_recipients.read_at`). Staff `/messages`; parents `/student/messages`, `/{id}` (marks read), `/unread-count`. Push data route `Messages` + `{id}`.
+- **Events** `services/events.py`: managers CRUD; everyone signed in reads `/events?status=upcoming|completed` (completed = end_date < today); photos uploaded, videos are https links.
+- **Transport**: vehicles + vehicle_type (bus/van/other), driver_id (driver account → photo), shift_name/start/end. `student_transport` (student → vehicle, stop, pickup/drop). `/vehicles/{id}/students` GET/PUT/DELETE; parents `/student/transport` (null = not on transport). No live tracking.
+- **Teachers**: teacher_profiles.designation (e.g. TGT); `/student/teachers` = the section's teachers with subjects (class teacher first; email, no phone).
+- TIME columns → "HH:MM" via `services/times.py`. Notification routes for students: timetable→StudentTimetable, syllabus→Syllabus, message→Messages, event→Events.
+- Tests: `tests/test_student_portal.py` (16) + the cross-school sweep in `test_organisations.py` covers every new endpoint.
 
 ## Conventions
 Dates `YYYY-MM-DD`, times 24h `HH:MM` local, weekday Mon=0…Sat=5. Lists: `?limit=&offset=` + `X-Total-Count` header.
@@ -62,7 +78,7 @@ Errors 400/403/404/409/422/429 with `{"detail"}`. Access JWT 15 min (set 1440 fo
 ```
 cp .env.example .env && source venv/bin/activate && pip install -r requirements.txt
 alembic upgrade head && uvicorn app.main:app --reload      # Swagger /docs in dev; local MySQL without TLS: DB_SSL_CA=""
-TEST_DATABASE_URL=mysql+pymysql://root:pass@127.0.0.1:3306/school_test pytest   # real MySQL; 167 tests
+TEST_DATABASE_URL=mysql+pymysql://root:pass@127.0.0.1:3306/school_test pytest   # real MySQL; 183 tests
 # tests/test_organisations.py: two schools, same names; sweeps every GET endpoint per role + cross-school ids → 404
 # tests/test_platform.py: /platform/* totals, alerts, detail isolation, paging/search, password/sign-out, audit, secret
 ruff check .   # py311, line 120
@@ -73,4 +89,4 @@ DEFAULT_ORG_CODE (school for requests without org_code; "" = code required), PLA
 Don't read/commit `.env` (real secrets).
 
 ## Recent work (git log)
-TiDB connection → CSV import, password reset, optimization → notifications + substitutions → **organisations / multi-school** (uncommitted: migration 0009, `db.org` scoping in every service, org-aware auth/reset/throttle/CLI, platform endpoints, tests) → **platform API for the owner portal** (uncommitted: `routes/platform.py`, `services/platform.py`, `models/platform.py`, `dependencies.platform_operator`, migration 0010, `tests/test_platform.py`; `routes/organisations.py` now only has the public lookup).
+TiDB connection → CSV import, password reset, optimization → notifications + substitutions → **organisations / multi-school** (uncommitted: migration 0009, `db.org` scoping in every service, org-aware auth/reset/throttle/CLI, platform endpoints, tests) → **platform API for the owner portal** (uncommitted: `routes/platform.py`, `services/platform.py`, `models/platform.py`, `dependencies.platform_operator`, migration 0010, `tests/test_platform.py`; `routes/organisations.py` now only has the public lookup) → **student portal** (uncommitted, Oct 2026: migration 0011 + the services/routes listed under "Student portal"; 183 tests, ruff clean).

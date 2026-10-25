@@ -197,12 +197,14 @@ def first_name(full_name: str | None) -> str:
 # --------------------------------------------- where tapping a message goes
 
 STAFF_ROUTES = {"fee": "FeesAdmin", "notice": "StaffNotices", "leave": "Leaves"}
-STUDENT_ROUTES = {"attendance": "Attendance", "fee": "Fees", "notice": "Notices", "homework": "Homework"}
+STUDENT_ROUTES = {"attendance": "Attendance", "fee": "Fees", "notice": "Notices", "homework": "Homework",
+                  "timetable": "StudentTimetable", "syllabus": "Syllabus", "message": "Messages", "event": "Events"}
 WEB_PATHS = {"fee": "/fees", "notice": "/notices", "leave": "/leaves"}
 
 
 def route(kind: str, *, student: bool) -> dict:
-    """`data` for the simple types (attendance, fee, notice, homework, leave)."""
+    """`data` for the simple types (attendance, fee, notice, homework, leave;
+    students also timetable, syllabus, message, event)."""
     data: dict = {"route": (STUDENT_ROUTES if student else STAFF_ROUTES)[kind]}
     if kind in WEB_PATHS:
         data["web_path"] = WEB_PATHS[kind]

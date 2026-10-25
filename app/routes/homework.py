@@ -3,10 +3,11 @@
 - /homework                      list (by class/section) and assign
 - /homework/{id}                 edit / delete (the teacher who set it, or managers)
 - /homework/{id}/submissions     every student of the section with their status; bulk update
+- /homework/{id}/attachment      add / replace / remove the homework sheet (PDF or photo)
 
 Permissions: managers, or teachers assigned to the section (class or subject teacher).
 """
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, File, Response, UploadFile
 
 from app.core.roles import STAFF
 from app.db import Db
@@ -54,4 +55,16 @@ def list_submissions(homework_id: int, user: CurrentUser = Depends(staff), db: D
 def save_submissions(homework_id: int, body: SubmissionsUpdate, user: CurrentUser = Depends(staff),
                      db: Db = Depends(get_db)):
     homework_service.save_submissions(db, user, homework_id, body)
+    return Response(status_code=204)
+
+
+@router.post("/{homework_id}/attachment")
+def attach_file(homework_id: int, file: UploadFile = File(...), user: CurrentUser = Depends(staff),
+                db: Db = Depends(get_db)):
+    return homework_service.attach(db, user, homework_id, file)
+
+
+@router.delete("/{homework_id}/attachment", status_code=204)
+def remove_attachment(homework_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    homework_service.remove_attachment(db, user, homework_id)
     return Response(status_code=204)
