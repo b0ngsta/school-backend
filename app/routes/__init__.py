@@ -33,6 +33,7 @@ from app.routes import (
     substitutions,
     timetable,
     transport,
+    updates,
     users,
 )
 
@@ -69,6 +70,7 @@ ALL_ROUTERS = (
     documents.router,
     messages.router,
     events.router,
+    updates.router,
     jobs.router,
     files.router,
 )

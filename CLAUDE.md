@@ -53,7 +53,8 @@ hr.py: /holidays, /leaves (+approve/reject), /salaries, /staff-attendance (check
 /timetable (mine, week, slots) · /substitutions (availability, incoming/outgoing, accept/decline/withdraw/cancel) ·
 /settings/school-timings · /notifications (+unread-count, read) + /devices (FCM tokens) · /imports/users (columns, template, export) ·
 /student/* (parent portal, "me"-scoped) · /internal/jobs/fee-reminders (X-Jobs-Secret; all schools) ·
-/school (+logo) · /announcements (+images) · /documents · /messages (+recipients, attachment) · /events (+photos, videos, media)
+/school (+logo) · /announcements (+images) · /documents · /messages (+recipients, attachment) · /events (+photos, videos, media) ·
+/updates (what's new per section, for the app's red dots)
 
 ## Student portal (migration 0011, Oct 2026) — feeds the parent app's portal screens
 - **Files on records**: `services/attachments.py` (PDF or JPEG/PNG/WebP, 15 MB) → columns `attachment_path / attachment_name / attachment_type ('pdf'|'image')` on notices, class_homework, messages, school_documents. Signed on the way out: `core/file_urls.FILE_FIELDS` now also has `attachment_path, image_path, logo_path, media_path, driver_photo`. Upload endpoints are separate `POST …/{id}/attachment` (create stays JSON); documents are multipart in one call.
@@ -70,6 +71,12 @@ hr.py: /holidays, /leaves (+approve/reject), /salaries, /staff-attendance (check
 - TIME columns → "HH:MM" via `services/times.py`. Notification routes for students: timetable→StudentTimetable, syllabus→Syllabus, message→Messages, event→Events.
 - Tests: `tests/test_student_portal.py` (16) + the cross-school sweep in `test_organisations.py` covers every new endpoint.
 
+## What's new per section — `GET /updates` (Oct 2026, no migration) — `routes/updates.py` + `services/updates.py`
+- Any signed-in user. `{server_time, sections: {key: {latest_at, unread?}}}`: for each home-screen section of the caller's role, the newest created/changed time (ISO with the school offset; `null` = empty). ONE query of scalar subqueries, all `org_id`-filtered. Read-only, nothing stored: the mobile app keeps "last opened" per device + account and shows a red dot where `latest_at` is newer (mobile `src/updates.ts`).
+- Student keys (`STUDENT_SECTIONS`): homework (class_homework of the section + own homeworks), notices, messages (+ `unread`), timetable (timetable documents in scope + the section's timetable_slots), syllabus, events, attendance, fees (+ claim reviews), exams (published results), report_cards, holidays, transport.
+- Staff keys (`staff_sections(role)`): managers notices / holidays / leaves (others' requests) / substitutions / fee_claims (pending); teacher notices / holidays / leaves (own reviewed) / substitutions / timetable (own slots) / salary; driver notices / holidays / leaves / salary. Notices you posted yourself don't count. Deletions never light a dot.
+- Tests: `tests/test_updates.py` (3); the cross-school GET sweep in `test_organisations.py` picks `/updates` up automatically.
+
 ## Conventions
 Dates `YYYY-MM-DD`, times 24h `HH:MM` local, weekday Mon=0…Sat=5. Lists: `?limit=&offset=` + `X-Total-Count` header.
 Errors 400/403/404/409/422/429 with `{"detail"}`. Access JWT 15 min (set 1440 for clients without refresh), refresh 30d idle/180d max.
@@ -78,7 +85,7 @@ Errors 400/403/404/409/422/429 with `{"detail"}`. Access JWT 15 min (set 1440 fo
 ```
 cp .env.example .env && source venv/bin/activate && pip install -r requirements.txt
 alembic upgrade head && uvicorn app.main:app --reload      # Swagger /docs in dev; local MySQL without TLS: DB_SSL_CA=""
-TEST_DATABASE_URL=mysql+pymysql://root:pass@127.0.0.1:3306/school_test pytest   # real MySQL; 183 tests
+TEST_DATABASE_URL=mysql+pymysql://root:pass@127.0.0.1:3306/school_test pytest   # real MySQL; 186 tests
 # tests/test_organisations.py: two schools, same names; sweeps every GET endpoint per role + cross-school ids → 404
 # tests/test_platform.py: /platform/* totals, alerts, detail isolation, paging/search, password/sign-out, audit, secret
 ruff check .   # py311, line 120
@@ -89,4 +96,4 @@ DEFAULT_ORG_CODE (school for requests without org_code; "" = code required), PLA
 Don't read/commit `.env` (real secrets).
 
 ## Recent work (git log)
-TiDB connection → CSV import, password reset, optimization → notifications + substitutions → **organisations / multi-school** (uncommitted: migration 0009, `db.org` scoping in every service, org-aware auth/reset/throttle/CLI, platform endpoints, tests) → **platform API for the owner portal** (uncommitted: `routes/platform.py`, `services/platform.py`, `models/platform.py`, `dependencies.platform_operator`, migration 0010, `tests/test_platform.py`; `routes/organisations.py` now only has the public lookup) → **student portal** (uncommitted, Oct 2026: migration 0011 + the services/routes listed under "Student portal"; 183 tests, ruff clean).
+TiDB connection → CSV import, password reset, optimization → notifications + substitutions → **organisations / multi-school** (uncommitted: migration 0009, `db.org` scoping in every service, org-aware auth/reset/throttle/CLI, platform endpoints, tests) → **platform API for the owner portal** (uncommitted: `routes/platform.py`, `services/platform.py`, `models/platform.py`, `dependencies.platform_operator`, migration 0010, `tests/test_platform.py`; `routes/organisations.py` now only has the public lookup) → **student portal** (uncommitted, Oct 2026: migration 0011 + the services/routes listed under "Student portal"; 183 tests, ruff clean) → **`GET /updates`** for the app's red "new" dots (uncommitted, Oct 2026: `routes/updates.py`, `services/updates.py`, `tests/test_updates.py`; no migration; 186 tests, ruff clean). Push (FCM) testing guide lives in the app repo: `work/ShelfwatchPlus/docs/TESTING_PUSH_NOTIFICATIONS.md`.
