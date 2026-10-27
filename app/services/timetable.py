@@ -46,8 +46,8 @@ def upsert_slot(db: Db, body: SlotUpsert) -> dict:
         limit = school_timings.periods_per_day(db)
         if limit is not None and body.period > limit:
             raise Unprocessable(f"The school day has {limit} periods (see school timings)")
-        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'teacher'",
-                      (body.teacher_id, db.org)):
+        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'teacher' "
+                      "AND left_on IS NULL", (body.teacher_id, db.org)):
             raise NotFound("Teacher not found")
         if not db.one("SELECT id FROM sections WHERE id = %s AND class_id = %s AND org_id = %s",
                       (body.section_id, body.class_id, db.org)):

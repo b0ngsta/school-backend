@@ -63,7 +63,7 @@ def history(db: Db, page: pagination.Page | None = None) -> pagination.PageResul
     """Latest 100 by default (as before); pages reach the full history."""
     return pagination.fetch(
         db,
-        "SELECT m.*, u.full_name AS sent_by FROM sms_messages m JOIN users u ON u.id = m.created_by "
+        "SELECT m.*, u.full_name AS sent_by FROM sms_messages m LEFT JOIN users u ON u.id = m.created_by "
         "WHERE m.org_id = %s",
         (db.org,),
         "m.created_at DESC, m.id DESC",

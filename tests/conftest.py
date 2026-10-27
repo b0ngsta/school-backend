@@ -44,6 +44,7 @@ os.environ.update(
     DB_POOL_PING_AFTER="0",
     PLATFORM_SECRET="test-platform-secret",
     DEFAULT_ORG_CODE="DEFAULT",
+    JOBS_WORKER="false",  # tests run jobs inline (background.run_inline) or call run_pending() themselves
 )
 
 from dbutil import alembic, recreate_database  # noqa: E402
@@ -103,6 +104,14 @@ def fresh_db(migrated_db):
         db.execute("SET FOREIGN_KEY_CHECKS = 1")
         db.close()
     yield
+
+
+@pytest.fixture(autouse=True)
+def known_captcha(monkeypatch):
+    """Every CAPTCHA picture shows helpers.CAPTCHA_TEXT, so tests can solve it."""
+    from app.services import captcha
+
+    monkeypatch.setattr(captcha, "new_text", lambda: "ABCDE")
 
 
 @pytest.fixture

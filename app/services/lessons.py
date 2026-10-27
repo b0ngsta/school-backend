@@ -78,7 +78,7 @@ def list_lesson_plans(db: Db, user: CurrentUser, teacher_id: int | None, class_i
     sql = (
         "SELECT lp.*, u.full_name AS teacher_name, c.name AS class_name, s.name AS section_name "
         "FROM lesson_plans lp "
-        "JOIN users u ON u.id = lp.teacher_id "
+        "LEFT JOIN users u ON u.id = lp.teacher_id "
         "JOIN classes c ON c.id = lp.class_id "
         "LEFT JOIN sections s ON s.id = lp.section_id"
     )

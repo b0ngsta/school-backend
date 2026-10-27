@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from app.db import Db
 from app.dependencies import get_current_user, get_db, get_optional_user
 from app.models.auth import (
+    CaptchaResponse,
     ChangePasswordRequest,
     CurrentUser,
     ForgotPasswordRequest,
@@ -17,14 +18,27 @@ from app.models.auth import (
     VerifyResetCodeRequest,
 )
 from app.services import auth as auth_service
-from app.services import password_reset
+from app.services import captcha, password_reset
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/login", response_model=LoginResponse)
 def login(body: LoginRequest, db: Db = Depends(get_db)):
-    return auth_service.login(db, body.username, body.password, body.org_code)
+    """Send the app's install id as `X-Device-Id` (8–64 letters, digits, `.`, `_`, `-`): repeated
+    failures then lock only that device. Apps that send `captcha_supported: true` get 428
+    `code: captcha_required` after a few failures instead of a lock-out: get a picture from
+    POST /auth/captcha and send `captcha_id` + `captcha_answer` with the next try
+    (`captcha_invalid` = wrong answer, get a new picture). Apps that don't send it keep the
+    original limits (see services/login_throttle.py)."""
+    return auth_service.login(db, body.username, body.password, body.org_code,
+                              body.captcha_id, body.captcha_answer, body.captcha_supported)
+
+
+@router.post("/captcha", response_model=CaptchaResponse)
+def new_captcha(db: Db = Depends(get_db)):
+    """A one-time picture with 5 characters for the next sign-in attempt."""
+    return captcha.issue(db)
 
 
 @router.get("/me")

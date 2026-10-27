@@ -10,7 +10,8 @@ from app.services import access, audit
 
 def create_assignment(db: Db, actor: CurrentUser, body: AssignmentCreate) -> dict:
     with db.transaction():
-        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'teacher' FOR UPDATE",
+        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'teacher' "
+                      "AND left_on IS NULL FOR UPDATE",
                       (body.teacher_id, db.org)):
             raise NotFound("Teacher not found")
         if not db.one("SELECT id FROM sections WHERE id = %s AND class_id = %s AND org_id = %s FOR UPDATE",

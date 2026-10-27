@@ -18,7 +18,7 @@ from app.services import audit, notify, pagination, substitutions
 def list_holidays(db: Db, year: int | None) -> list[dict]:
     sql = (
         "SELECT h.*, u.full_name AS created_by_name FROM holidays h "
-        "JOIN users u ON u.id = h.created_by WHERE h.org_id = %s"
+        "LEFT JOIN users u ON u.id = h.created_by WHERE h.org_id = %s"
     )
     params: tuple = (db.org,)
     if year:
@@ -196,7 +196,7 @@ def review_leave(db: Db, actor: CurrentUser, leave_id: int, new_status: str, not
 def my_salaries(db: Db, actor: CurrentUser) -> list[dict]:
     return db.all(
         "SELECT s.*, u.full_name AS created_by_name FROM salary_records s "
-        "JOIN users u ON u.id = s.created_by "
+        "LEFT JOIN users u ON u.id = s.created_by "
         "WHERE s.user_id = %s ORDER BY s.year DESC, s.month DESC",
         (actor.id,),
     )

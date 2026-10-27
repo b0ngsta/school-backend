@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.core.context import client_ip_var, request_id_var, request_state_var, user_agent_var
+from app.core.context import client_ip_var, device_id_var, request_id_var, request_state_var, user_agent_var
 from app.core.file_urls import sign_file_fields
 
 
@@ -28,6 +28,7 @@ class ApiJSONResponse(JSONResponse):
 access_log = logging.getLogger("app.access")
 
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_SAFE_DEVICE_ID = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
 
 _SECURITY_HEADERS = (
     ("x-content-type-options", "nosniff"),
@@ -58,6 +59,8 @@ class RequestContextMiddleware:
         request_id_var.set(rid)
         client_ip_var.set(client[0] if client else None)
         user_agent_var.set(headers.get("user-agent", "")[:255] or None)
+        device = headers.get("x-device-id", "")
+        device_id_var.set(device if _SAFE_DEVICE_ID.match(device) else None)
         state: dict = {}
         request_state_var.set(state)
         started = time.perf_counter()

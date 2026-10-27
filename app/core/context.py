@@ -5,6 +5,8 @@ from contextvars import ContextVar
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 client_ip_var: ContextVar[str | None] = ContextVar("client_ip", default=None)
 user_agent_var: ContextVar[str | None] = ContextVar("user_agent", default=None)
+# the app install / browser id sent as X-Device-Id (login throttling per device)
+device_id_var: ContextVar[str | None] = ContextVar("device_id", default=None)
 # A dict shared by everything handling one request. Sync endpoints run in a
 # worker thread with a *copy* of the context, so values they need to hand back
 # (e.g. the authenticated user id for the access log) go into this dict.
@@ -21,6 +23,10 @@ def client_ip() -> str | None:
 
 def user_agent() -> str | None:
     return user_agent_var.get()
+
+
+def device_id() -> str | None:
+    return device_id_var.get()
 
 
 def user_id() -> int | None:

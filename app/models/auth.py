@@ -14,6 +14,19 @@ class LoginRequest(BaseModel):
     org_code: str | None = _org_code()
     username: str = Field(max_length=100)
     password: str = Field(max_length=PASSWORD_MAX_LENGTH)
+    # true = this app can show a CAPTCHA picture: after a few failures it gets 428
+    # {"code": "captcha_required"} instead of being locked out (apps without it keep the old limits)
+    captcha_supported: bool = False
+    # only after a 428 {"code": "captcha_required"}: the picture from POST /auth/captcha and what was typed
+    captcha_id: str | None = Field(default=None, max_length=32)
+    captcha_answer: str | None = Field(default=None, max_length=20)
+
+
+class CaptchaResponse(BaseModel):
+    captcha_id: str
+    image: str = Field(description="data:image/png;base64,… — show it as an image")
+    expires_in: int
+    length: int
 
 
 class TokenResponse(BaseModel):

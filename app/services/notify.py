@@ -3,9 +3,10 @@
     notify(db, user_ids, "fee", "New fee: Term 2 — ₹12,500 due 30 Jun", data=routes.fee_student())
 
 writes one `notifications` row per recipient inside the caller's transaction
-(one multi-row INSERT, however many recipients), and sends the push messages
-in a background job *after* the commit — a failed push never rolls back the
-action, and a rolled-back action never sends a push.
+(one multi-row INSERT, however many recipients) and stores the push messages
+as durable background jobs in the same transaction: they are sent after the
+commit, retried if FCM fails, and survive a restart — a failed push never rolls
+back the action, and a rolled-back action never sends a push.
 
 Push needs FIREBASE_CREDENTIALS (service-account JSON: a file path or the JSON
 itself) and the `firebase-admin` package; without them only the in-app inbox
@@ -63,10 +64,10 @@ def notify_each(db: Db, items: Sequence[Item], type: str, push: bool = True) -> 
     if not push or not push_configured():
         return
     payload = [(i.user_id, type, i.title[:200], i.body, i.data or {}) for i in items]
-    if db.in_transaction:
-        db.on_commit(lambda: background.submit(_send_push, payload))
-    else:
-        background.submit(_send_push, payload)
+    # durable jobs, stored in the caller's transaction: sent only if it commits, and
+    # never lost to a restart (services/background.py); one job per FCM batch
+    for start in range(0, len(payload), FCM_BATCH):
+        background.enqueue(db, _send_push, payload[start:start + FCM_BATCH])
 
 
 # ------------------------------------------------------------------- push
@@ -118,6 +119,7 @@ def _message(token: str, type: str, title: str, body: str | None, data: dict):
     )
 
 
+@background.task
 def _send_push(payload: list[tuple[int, str, str, str | None, dict]]) -> None:
     """Background job: send every recipient's devices their message and drop
     the tokens FCM says are no longer valid."""

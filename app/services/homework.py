@@ -35,7 +35,7 @@ HOMEWORK_SELECT = (
     "FROM class_homework h "
     "JOIN classes c ON c.id = h.class_id "
     "JOIN sections s ON s.id = h.section_id "
-    "JOIN users u ON u.id = h.created_by"
+    "LEFT JOIN users u ON u.id = h.created_by"
 )
 
 
@@ -222,13 +222,13 @@ def student_homework_sql(columns: str) -> str:
         "'class' AS scope, h.id AS homework_id, h.attachment_path, h.attachment_name, h.attachment_type "
         "FROM class_homework h "
         "JOIN student_profiles sp ON sp.section_id = h.section_id AND sp.class_id = h.class_id AND sp.user_id = %s "
-        "JOIN users u ON u.id = h.created_by "
+        "LEFT JOIN users u ON u.id = h.created_by "
         "LEFT JOIN homework_submissions hs ON hs.homework_id = h.id AND hs.student_id = sp.user_id "
         "UNION ALL "
         "SELECT hw.id, hw.student_id, hw.title, hw.due_date, hw.status, hw.note, hw.created_by, hw.created_at, "
         "hw.updated_at, u.full_name AS created_by_name, NULL AS subject, 'student' AS scope, NULL AS homework_id, "
         "NULL AS attachment_path, NULL AS attachment_name, NULL AS attachment_type "
-        "FROM homeworks hw JOIN users u ON u.id = hw.created_by WHERE hw.student_id = %s"
+        "FROM homeworks hw LEFT JOIN users u ON u.id = hw.created_by WHERE hw.student_id = %s"
         ") AS hw"
     )
 

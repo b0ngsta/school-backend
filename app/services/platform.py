@@ -35,7 +35,7 @@ from app.core.roles import MANAGERS
 from app.db import Db
 from app.models.platform import PlatformPasswordReset
 from app.models.school import SchoolProfileUpdate
-from app.services import audit, dashboard, organisations, school_profile, sessions
+from app.services import audit, background, dashboard, organisations, school_profile, sessions
 from app.services import auth as auth_service
 
 TREND_DAYS = 14
@@ -237,7 +237,7 @@ def school_rows(db: Db) -> list[dict]:
         "COALESCE(SUM(user_type = 'student' AND is_active = 1), 0) AS active_students, "
         "COALESCE(SUM(user_type = 'teacher' AND is_active = 1), 0) AS teachers, "
         "COALESCE(SUM(created_at >= %s), 0) AS new_users_30d "
-        "FROM users GROUP BY org_id", (w.local_30d,)))
+        "FROM users WHERE left_on IS NULL GROUP BY org_id", (w.local_30d,)))
     attendance = _by_org(db.all(
         "SELECT org_id, COUNT(*) AS marked, COALESCE(SUM(status = 'present'), 0) AS present "
         "FROM attendance WHERE date = %s GROUP BY org_id", (w.today,)))
@@ -422,7 +422,7 @@ def school_detail(db: Db, code: str) -> dict:
         "SELECT user_type, COUNT(*) AS total, COALESCE(SUM(is_active = 1), 0) AS active, "
         "COALESCE(SUM(must_change_password = 1), 0) AS must_change, "
         "COALESCE(SUM(created_at >= %s), 0) AS new_30d "
-        "FROM users WHERE org_id = %s GROUP BY user_type", (w.local_30d, oid))}
+        "FROM users WHERE org_id = %s AND left_on IS NULL GROUP BY user_type", (w.local_30d, oid))}
     enquiries = {r["status"]: _int(r["n"]) for r in db.all(
         "SELECT status, COUNT(*) AS n FROM enquiries WHERE org_id = %s GROUP BY status", (oid,))}
     engagement = db.one(
@@ -513,6 +513,7 @@ def _account(row: dict) -> dict:
         "phone": row["phone"],
         "user_type": row["user_type"],
         "is_active": bool(row["is_active"]),
+        "left_on": row["left_on"].isoformat() if row.get("left_on") else None,
         "must_change_password": bool(row["must_change_password"]),
         "created_at": _school_iso(row["created_at"]),
         "last_seen_at": _utc_iso(row["last_seen_at"]),
@@ -551,11 +552,12 @@ def school_users(
                      "OR sp.admission_no LIKE %s)")
         params += [like] * 5
     joins = ("FROM users u LEFT JOIN student_profiles sp ON sp.user_id = u.id "
-             "LEFT JOIN classes c ON c.id = sp.class_id LEFT JOIN sections s ON s.id = sp.section_id ")
+             "LEFT JOIN classes c ON c.id = COALESCE(sp.class_id, sp.last_class_id) "
+             "LEFT JOIN sections s ON s.id = COALESCE(sp.section_id, sp.last_section_id) ")
     clause = "WHERE " + " AND ".join(where)
     total = _int(db.scalar(f"SELECT COUNT(*) {joins}{clause}", params))
     rows = db.all(
-        "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.user_type, u.is_active, "
+        "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.user_type, u.is_active, u.left_on, "
         "u.must_change_password, u.created_at, sp.admission_no, sp.roll_no, "
         "c.name AS class_name, s.name AS section_name, "
         "(SELECT MAX(a.last_used_at) FROM auth_sessions a WHERE a.user_id = u.id) AS last_seen_at "
@@ -680,10 +682,15 @@ def system_status(db: Db) -> dict:
         "SELECT table_name AS name, COALESCE(table_rows, 0) AS row_estimate, "
         "COALESCE(data_length, 0) + COALESCE(index_length, 0) AS bytes "
         "FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY bytes DESC")
+    try:
+        jobs = background.queue_status(db)
+    except Exception:  # noqa: BLE001 - before migration 0016
+        jobs = None
     return {
         "server_time": school_now().isoformat(timespec="seconds"),
         "timezone": settings.timezone,
         "env": settings.env,
+        "jobs": jobs,
         "database": {
             "ping_ms": ping_ms,
             "version": info.get("version"),

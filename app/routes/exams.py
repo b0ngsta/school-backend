@@ -5,7 +5,7 @@
 - question paper upload: admin / sub_admin / coordinator / principal
 - exams with class_id = NULL apply to ALL classes
 """
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 
 from app.core.roles import MANAGERS, STAFF
 from app.db import Db
@@ -99,8 +99,11 @@ def get_paper(exam_id: int, user: CurrentUser = Depends(staff), db: Db = Depends
 # ---------- results ----------
 
 @router.get("/{exam_id}/results")
-def exam_results(exam_id: int, section_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
-    return exam_service.exam_results(db, user, exam_id, section_id)
+def exam_results(exam_id: int, section_id: int,
+                 subject: str | None = Query(None, max_length=100,
+                                             description="Leave out for the whole exam; else a subject of the class"),
+                 user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    return exam_service.exam_results(db, user, exam_id, section_id, subject)
 
 
 @router.put("/{exam_id}/results")

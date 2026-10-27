@@ -289,15 +289,64 @@ USER_COMMANDS = {"set-password": set_password, "revoke-sessions": revoke_session
 ORG_COMMANDS = ("list-orgs", "create-org", "rename-org", "change-org-code", "disable-org", "enable-org")
 
 
+# ----------------------------------------------------------- background jobs
+
+def run_jobs(args) -> None:
+    """Run due background jobs (push, email, password-reset lookups) once, or keep going with --forever."""
+    import app.main  # noqa: F401  (registers every background task)
+    from app.services import background
+
+    if args.forever:
+        print("Running background jobs (Ctrl+C to stop)…")
+        try:
+            background.work_forever()
+        except KeyboardInterrupt:
+            pass
+        return
+    total = 0
+    while ran := background.run_pending():
+        total += ran
+    print(f"Ran {total} job(s).")
+
+
+def retry_failed_jobs(_args) -> None:
+    from app.services import background
+
+    print(f"{background.retry_failed()} failed job(s) queued again.")
+
+
+def cleanup(_args) -> None:
+    from app.services import retention
+
+    db = Db(pool)
+    try:
+        removed = retention.run(db)
+    finally:
+        db.close()
+    for table, count in removed.items():
+        print(f"{table:22} {count} row(s) removed")
+
+
+JOB_COMMANDS = {"run-jobs": run_jobs, "retry-failed-jobs": retry_failed_jobs, "cleanup": cleanup}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
-    parser.add_argument("command", choices=sorted([*USER_COMMANDS, *ORG_COMMANDS, "check-db", "check-data",
-                                                   "copy-uploads-to-s3", "check-storage", "missing-uploads"]))
+    parser.add_argument("command", choices=sorted([*USER_COMMANDS, *ORG_COMMANDS, *JOB_COMMANDS, "check-db",
+                                                   "check-data", "copy-uploads-to-s3", "check-storage",
+                                                   "missing-uploads"]))
     parser.add_argument("args", nargs="*", help="username, or school code [and name] for the *-org commands")
     parser.add_argument("--org", help="school code (default: DEFAULT_ORG_CODE)")
     parser.add_argument("--admin-username", default="admin")
     parser.add_argument("--admin-email")
+    parser.add_argument("--forever", action="store_true", help="run-jobs: keep running (a worker process)")
     args = parser.parse_args()
+    if args.command in JOB_COMMANDS:
+        try:
+            JOB_COMMANDS[args.command](args)
+        finally:
+            pool.close_all()
+        return
     needs = {**dict.fromkeys(USER_COMMANDS, 1), "create-org": 2, "rename-org": 2, "change-org-code": 2,
              "disable-org": 1, "enable-org": 1}
     if len(args.args) < needs.get(args.command, 0):

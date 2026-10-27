@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.core.clock import school_today
-from app.core.errors import NotFound
+from app.core.errors import BadRequest, NotFound
 from app.db import Db
 from app.models.attendance import AttendanceMark
 from app.models.auth import CurrentUser
@@ -60,6 +60,8 @@ def get_attendance(db: Db, user: CurrentUser, section_id: int, day: date) -> lis
 
 
 def mark_attendance(db: Db, user: CurrentUser, body: AttendanceMark) -> dict:
+    if body.date > school_today():
+        raise BadRequest("Attendance can't be marked for a future date")
     with db.transaction():
         access.ensure_can_edit_students(db, user, _section_class(db, body.section_id), body.section_id)
         access.ensure_students_in_section(db, body.section_id, (r.student_id for r in body.records))

@@ -115,10 +115,20 @@ def test_attendance_month_counts():
     holidays = {date(2026, 10, 11): "Navratri", date(2026, 10, 19): "Durgashtami", date(2026, 10, 20): "Dussehra"}
     records = {date(2026, 10, d): "present" for d in range(1, 17)}
     records.update({date(2026, 10, 7): "absent", date(2026, 10, 10): "absent", date(2026, 10, 22): "absent"})
-    month = student_attendance._month_counts(2026, 10, holidays, records)
+    # the whole month is over: every working day counts
+    month = student_attendance._month_counts(2026, 10, holidays, records, today=date(2026, 11, 2))
     assert (month["days"], month["sundays"], month["holidays"], month["working_days"]) == (31, 4, 2, 25)
     assert (month["present"], month["absent"]) == (14, 3)
     assert month["percent"] == 56
+    # on 17 Oct only the days so far count (1-16 Oct minus 2 Sundays); days to come can't be missed
+    records.pop(date(2026, 10, 22))
+    month = student_attendance._month_counts(2026, 10, holidays, records, today=date(2026, 10, 17))
+    assert (month["working_days"], month["working_days_total"]) == (14, 25)
+    assert month["percent"] == 100
+    # today counts once it has been marked
+    records[date(2026, 10, 17)] = "present"
+    assert student_attendance._month_counts(2026, 10, holidays, records, today=date(2026, 10, 17))[
+        "working_days"] == 15
 
 
 def test_attendance_half_day_overview_and_month(client, school, s1):
@@ -136,13 +146,15 @@ def test_attendance_half_day_overview_and_month(client, school, s1):
 
     ov = _ok(client.get("/student/attendance/overview", headers=bearer(s1)))
     assert (ov["totals"]["present"], ov["totals"]["half_day"], ov["totals"]["absent"]) == (1, 1, 1)
-    assert ov["totals"]["working_days"] > 250
+    assert ov["totals"]["working_days_total"] > 250  # the whole session
+    assert 3 <= ov["totals"]["working_days"] < ov["totals"]["working_days_total"]  # only days so far
     assert ov["months"][-1]["month"] == today.month
     assert ov["totals"]["percent"] == round(1.5 * 100 / ov["totals"]["working_days"], 1)
 
     m = _ok(client.get(f"/student/attendance/month?year={days[0].year}&month={days[0].month}", headers=bearer(s1)))
     by_day = {d["date"]: d["status"] for d in m["days"]}
     assert by_day[str(days[0])] == "present"
+    assert not any(d["is_future"] for d in m["days"] if d["date"] <= str(today))
     assert sum(m["summary"].values()) <= len(m["days"])
     assert _ok(client.get("/student/attendance/month?year=2026&month=13", headers=bearer(s1)), 400)
     notes = _ok(client.get("/notifications", headers=bearer(s1)))

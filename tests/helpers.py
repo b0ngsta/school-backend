@@ -99,3 +99,19 @@ def png_bytes() -> bytes:
 
 
 PDF_BYTES = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
+
+
+# ------------------------------------------------------------ CAPTCHA-capable clients
+
+CAPTCHA_TEXT = "ABCDE"  # conftest makes every picture show this
+
+
+def post_login(client: TestClient, body: dict, headers: dict | None = None):
+    """POST /auth/login as an app that can show a CAPTCHA, solving the picture when asked."""
+    body = {**body, "captcha_supported": True}
+    r = client.post("/auth/login", json=body, headers=headers or {})
+    if r.status_code == 428 and r.json().get("code") == "captcha_required":
+        pic = client.post("/auth/captcha").json()
+        r = client.post("/auth/login", headers=headers or {},
+                        json={**body, "captcha_id": pic["captcha_id"], "captcha_answer": CAPTCHA_TEXT})
+    return r

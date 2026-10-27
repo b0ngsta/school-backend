@@ -76,8 +76,10 @@ def public_info(db: Db, code: str) -> dict:
 def list_all(db: Db) -> list[dict]:
     return db.all(
         f"SELECT o.{_COLUMNS.replace(', ', ', o.')}, "
-        "(SELECT COUNT(*) FROM users u WHERE u.org_id = o.id AND u.user_type = 'student') AS students, "
-        "(SELECT COUNT(*) FROM users u WHERE u.org_id = o.id AND u.user_type != 'student') AS staff "
+        "(SELECT COUNT(*) FROM users u WHERE u.org_id = o.id AND u.user_type = 'student' "
+        " AND u.left_on IS NULL) AS students, "
+        "(SELECT COUNT(*) FROM users u WHERE u.org_id = o.id AND u.user_type != 'student' "
+        " AND u.left_on IS NULL) AS staff "
         "FROM organisations o ORDER BY o.id"
     )
 

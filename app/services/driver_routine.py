@@ -280,7 +280,8 @@ def save_shift_students(db: Db, vehicle_id: int, shift_id: int, body: ShiftStude
         if ids:
             marks = ", ".join(["%s"] * len(ids))
             found = {r["id"] for r in db.all(
-                f"SELECT id FROM users WHERE org_id = %s AND user_type = 'student' AND id IN ({marks})",
+                f"SELECT id FROM users WHERE org_id = %s AND user_type = 'student' AND left_on IS NULL "
+                f"AND id IN ({marks})",
                 (db.org, *ids))}
             if missing := [i for i in ids if i not in found]:
                 raise NotFound(f"Student not found: {missing[0]}")

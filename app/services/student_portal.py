@@ -89,7 +89,7 @@ def dashboard(db: Db, uid: int) -> dict:
         )
     notices = db.all(
         "SELECT n.id, n.title, n.created_at, u.full_name AS posted_by "
-        "FROM notices n JOIN users u ON u.id = n.created_by WHERE n.org_id = %s "
+        "FROM notices n LEFT JOIN users u ON u.id = n.created_by WHERE n.org_id = %s "
         "ORDER BY n.created_at DESC LIMIT 3",
         (db.org,),
     )
@@ -132,7 +132,7 @@ def homework_subjects(db: Db, uid: int) -> list[dict]:
 def remarks(db: Db, uid: int) -> list[dict]:
     return db.all(
         "SELECT r.id, r.remark, r.created_at, u.full_name AS by_name "
-        "FROM student_remarks r JOIN users u ON u.id = r.created_by "
+        "FROM student_remarks r LEFT JOIN users u ON u.id = r.created_by "
         "WHERE r.student_id = %s ORDER BY r.created_at DESC",
         (uid,),
     )
@@ -142,7 +142,7 @@ def report_cards(db: Db, uid: int) -> list[dict]:
     return db.all(
         "SELECT rc.id, rc.term, rc.grades, rc.remarks, rc.created_at, "
         "  u.full_name AS issued_by "
-        "FROM report_cards rc JOIN users u ON u.id = rc.created_by "
+        "FROM report_cards rc LEFT JOIN users u ON u.id = rc.created_by "
         "WHERE rc.student_id = %s ORDER BY rc.created_at DESC",
         (uid,),
     )
@@ -162,20 +162,46 @@ def exams(db: Db, uid: int) -> list[dict]:
     if not me or not me["class_id"]:
         return []
     rows = db.all(
-        "SELECT e.id, e.name, e.start_date, e.end_date, e.results_published, "
+        "SELECT e.id, e.name, e.start_date, e.end_date, e.results_published, e.max_marks AS exam_max_marks, "
         "  CASE WHEN CURDATE() < e.start_date THEN 'upcoming' "
         "       WHEN CURDATE() > e.end_date THEN 'completed' "
         "       ELSE 'ongoing' END AS status, "
-        "  r.marks, r.grade, r.remarks "
+        "  r.marks, r.grade, r.remarks, r.max_marks "
         "FROM exams e "
-        "LEFT JOIN exam_results r ON r.exam_id = e.id AND r.student_id = %s "
+        "LEFT JOIN exam_results r ON r.exam_id = e.id AND r.student_id = %s AND r.subject = '' "
         "WHERE e.org_id = %s AND (e.class_id = %s OR e.class_id IS NULL) ORDER BY e.start_date DESC",
         (uid, db.org, me["class_id"]),
     )
-    # hide marks until results are published
+    published = [e["id"] for e in rows if e["results_published"]]
+    by_exam: dict[int, list[dict]] = {}
+    if published:
+        for r in db.all(
+            "SELECT exam_id, subject, marks, max_marks, grade, remarks FROM exam_results "
+            f"WHERE student_id = %s AND subject <> '' AND exam_id IN ({','.join(['%s'] * len(published))}) "
+            "ORDER BY exam_id, id",
+            (uid, *published),
+        ):
+            by_exam.setdefault(r.pop("exam_id"), []).append(r)
     for e in rows:
-        if not e["results_published"]:
-            e["marks"] = e["grade"] = e["remarks"] = None
+        exam_max = e.pop("exam_max_marks")
+        if not e["results_published"]:  # hide marks until results are published
+            e["marks"] = e["grade"] = e["remarks"] = e["max_marks"] = None
+            e["subjects"], e["total"], e["max_total"] = [], None, None
+            continue
+        subjects = by_exam.get(e["id"], [])
+        for sub in subjects:
+            if sub["max_marks"] is None:
+                sub["max_marks"] = exam_max
+        e["subjects"] = subjects
+        marked = [sub for sub in subjects if sub["marks"] is not None]
+        e["total"] = sum(float(sub["marks"]) for sub in marked) if marked else None
+        e["max_total"] = (sum(float(sub["max_marks"]) for sub in marked)
+                          if marked and all(sub["max_marks"] is not None for sub in marked) else None)
+        if e["max_marks"] is None and e["marks"] is not None:
+            e["max_marks"] = exam_max
+        if e["marks"] is None and e["total"] is not None:
+            # only subject marks were entered: older app builds show `marks`, so give them the total
+            e["marks"], e["max_marks"] = e["total"], e["max_total"]
     return rows
 
 
@@ -230,7 +256,7 @@ def calendar(db: Db) -> dict:
 _NOTICE_SELECT = (
     "SELECT n.id, n.title, n.body, n.created_at, u.full_name AS posted_by, "
     "n.attachment_path, n.attachment_name, n.attachment_type "
-    "FROM notices n JOIN users u ON u.id = n.created_by WHERE n.org_id = %s"
+    "FROM notices n LEFT JOIN users u ON u.id = n.created_by WHERE n.org_id = %s"
 )
 
 

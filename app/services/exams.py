@@ -68,8 +68,9 @@ def create_exam(db: Db, body: ExamCreate) -> dict:
                                                 (body.class_id, db.org)):
         raise NotFound("Class not found")
     exam_id = db.execute(
-        "INSERT INTO exams (org_id, name, class_id, start_date, end_date) VALUES (%s, %s, %s, %s, %s)",
-        (db.org, body.name, body.class_id, body.start_date, body.end_date),
+        "INSERT INTO exams (org_id, name, class_id, start_date, end_date, max_marks) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (db.org, body.name, body.class_id, body.start_date, body.end_date, body.max_marks),
     ).lastrowid
     return {"id": exam_id}
 
@@ -107,9 +108,9 @@ def update_exam(db: Db, actor: CurrentUser, exam_id: int, body: ExamUpdate) -> d
         if merged["end_date"] < merged["start_date"]:
             raise BadRequest("end_date must be on/after start_date")
         db.execute(
-            "UPDATE exams SET name=%s, start_date=%s, end_date=%s, results_published=%s WHERE id=%s",
+            "UPDATE exams SET name=%s, start_date=%s, end_date=%s, results_published=%s, max_marks=%s WHERE id=%s",
             (merged["name"], merged["start_date"], merged["end_date"],
-             int(bool(merged["results_published"])), exam_id),
+             int(bool(merged["results_published"])), merged.get("max_marks"), exam_id),
         )
         if "results_published" in changes and bool(changes["results_published"]) != bool(current["results_published"]):
             audit.record(db, actor, "exam.results_published" if changes["results_published"]
@@ -147,7 +148,7 @@ def class_papers(db: Db, exam_id: int, class_id: int) -> dict:
         p["subject"]: p
         for p in db.all(
             "SELECT p.*, u.full_name AS uploaded_by_name "
-            "FROM exam_papers p JOIN users u ON u.id = p.uploaded_by "
+            "FROM exam_papers p LEFT JOIN users u ON u.id = p.uploaded_by "
             "WHERE p.exam_id = %s AND p.class_id = %s",
             (exam_id, class_id),
         )
@@ -251,21 +252,64 @@ def _section_in_exam(db: Db, exam: dict, section_id: int) -> dict:
     return section
 
 
-def exam_results(db: Db, user: CurrentUser, exam_id: int, section_id: int) -> dict:
+WHOLE_EXAM = ""  # exam_results.subject for a mark of the whole exam (the only kind before 0015)
+
+
+def _subjects(db: Db, exam_id: int, class_id: int) -> list[str]:
+    """The subjects marks can be entered for: the class's subjects, plus any
+    subject already used for this exam and class (papers or marks), in case it
+    was removed from the class later."""
+    names = [r["name"] for r in
+             db.all("SELECT name FROM class_subjects WHERE class_id = %s ORDER BY id", (class_id,))]
+    used = db.all(
+        "SELECT p.subject FROM exam_papers p WHERE p.exam_id = %s AND p.class_id = %s "
+        "UNION SELECT r.subject FROM exam_results r JOIN student_profiles sp ON sp.user_id = r.student_id "
+        "WHERE r.exam_id = %s AND r.subject <> '' AND sp.class_id = %s",
+        (exam_id, class_id, exam_id, class_id),
+    )
+    for r in used:
+        if r["subject"] and r["subject"] not in names:
+            names.append(r["subject"])
+    return names
+
+
+def _subject(db: Db, exam_id: int, class_id: int, subject: str | None) -> str:
+    name = (subject or "").strip()
+    if name and name not in _subjects(db, exam_id, class_id):
+        raise BadRequest(f"'{name}' is not a subject of this class")
+    return name
+
+
+def _number(value) -> float | None:
+    return float(value) if value is not None else None
+
+
+def exam_results(db: Db, user: CurrentUser, exam_id: int, section_id: int, subject: str | None = None) -> dict:
+    """The section's students with their marks for the whole exam (no subject,
+    as before) or for one subject. `subjects` lists what marks can be entered
+    for; `max_marks` is the maximum in effect for this subject."""
     exam = get_exam(db, exam_id)
     section = _section_in_exam(db, exam, section_id)
     access.ensure_can_view_section(db, user, section["class_id"], section_id)
+    name = _subject(db, exam_id, section["class_id"], subject)
     rows = db.all(
         "SELECT u.id AS student_id, u.full_name, u.photo_path, sp.roll_no, "
-        "r.marks, r.grade, r.remarks "
+        "r.marks, r.grade, r.remarks, r.max_marks "
         "FROM student_profiles sp "
         "JOIN users u ON u.id = sp.user_id "
-        "LEFT JOIN exam_results r ON r.student_id = u.id AND r.exam_id = %s "
+        "LEFT JOIN exam_results r ON r.student_id = u.id AND r.exam_id = %s AND r.subject = %s "
         "WHERE sp.section_id = %s AND u.is_active = 1 "
         "ORDER BY CAST(sp.roll_no AS UNSIGNED), u.full_name",
-        (exam_id, section_id),
+        (exam_id, name, section_id),
     )
-    return {"exam": exam, "rows": rows}
+    saved_max = next((r["max_marks"] for r in rows if r["max_marks"] is not None), None)
+    return {
+        "exam": exam,
+        "rows": rows,
+        "subject": name,
+        "max_marks": _number(saved_max if saved_max is not None else exam.get("max_marks")),
+        "subjects": _subjects(db, exam_id, section["class_id"]),
+    }
 
 
 def save_results(db: Db, user: CurrentUser, exam_id: int, body: ResultsSave) -> dict:
@@ -274,16 +318,27 @@ def save_results(db: Db, user: CurrentUser, exam_id: int, body: ResultsSave) -> 
         section = _section_in_exam(db, exam, body.section_id)
         if user.user_type == "teacher" and not access.is_assigned(db, user, section["class_id"], body.section_id):
             raise Forbidden("Not assigned to this section")
+        subject = _subject(db, exam_id, section["class_id"], body.subject)
+        max_marks = body.max_marks if body.max_marks is not None else _number(exam.get("max_marks"))
         entries = [r for r in body.results if r.marks is not None or r.grade]
         access.ensure_students_in_section(db, body.section_id, (r.student_id for r in entries))
+        too_high = [r for r in entries if max_marks is not None and r.marks is not None and r.marks > max_marks]
+        if too_high:
+            names = {row["id"]: row["full_name"] for row in db.all(
+                f"SELECT id, full_name FROM users WHERE org_id = %s AND id IN ({','.join(['%s'] * len(too_high))})",
+                (db.org, *(r.student_id for r in too_high)))}
+            who = ", ".join(names.get(r.student_id, str(r.student_id)) for r in too_high[:3])
+            more = f" and {len(too_high) - 3} more" if len(too_high) > 3 else ""
+            raise BadRequest(f"Marks can't be more than the maximum ({max_marks:g}): {who}{more}")
         db.execute_many(
-            "INSERT INTO exam_results (exam_id, student_id, marks, grade, remarks) "
-            "VALUES (%s, %s, %s, %s, %s) "
-            "ON DUPLICATE KEY UPDATE marks = VALUES(marks), grade = VALUES(grade), remarks = VALUES(remarks)",
-            [(exam_id, r.student_id, r.marks, r.grade, r.remarks) for r in entries],
+            "INSERT INTO exam_results (exam_id, student_id, subject, marks, max_marks, grade, remarks) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE marks = VALUES(marks), max_marks = VALUES(max_marks), "
+            "grade = VALUES(grade), remarks = VALUES(remarks)",
+            [(exam_id, r.student_id, subject, r.marks, max_marks, r.grade, r.remarks) for r in entries],
         )
         audit.record(db, user, "exam_results.save", "exam", exam_id,
-                     {"section_id": body.section_id,
+                     {"section_id": body.section_id, "subject": subject or None, "max_marks": max_marks,
                       "results": [{"student_id": r.student_id, "marks": r.marks, "grade": r.grade}
                                   for r in entries]})
     return {"saved": True}

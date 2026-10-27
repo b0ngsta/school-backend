@@ -28,7 +28,7 @@ UNION ALL
 (SELECT 'lesson', CONCAT('Lesson plan added: ', lp.heading),
         CONCAT(u.full_name, ' · ', c.name), lp.created_at
    FROM lesson_plans lp
-   JOIN users u ON u.id = lp.teacher_id
+   LEFT JOIN users u ON u.id = lp.teacher_id
    JOIN classes c ON c.id = lp.class_id
   WHERE lp.org_id = %(org)s)
 UNION ALL
@@ -37,7 +37,7 @@ UNION ALL
    FROM enquiries e WHERE e.org_id = %(org)s)
 UNION ALL
 (SELECT 'notice', CONCAT('Notice: ', n.title), u.full_name, n.created_at
-   FROM notices n JOIN users u ON u.id = n.created_by WHERE n.org_id = %(org)s)
+   FROM notices n LEFT JOIN users u ON u.id = n.created_by WHERE n.org_id = %(org)s)
 ORDER BY at DESC LIMIT 10
 """
 

@@ -21,6 +21,11 @@ Revisions so far:
 | `0005_notifications` … `0008_class_homework` | Notifications + device tokens, school timings, substitutions, class homework. |
 | `0009_organisations` | Several schools on one API: `organisations` table, `org_id` on every per-school table (existing rows → organisation 1, code `DEFAULT_ORG_CODE`), per-school unique keys. See `docs/ORGANISATIONS.md`. |
 | `0010_platform_indexes` | Two indexes for the owner portal's cross-school numbers: `auth_sessions(last_used_at)`, `staff_attendance(date, org_id)`. |
+| `0011_student_portal` / `0012_driver_routine` | Parent-app portal tables; driver shifts and riders. |
+| `0013_keep_history` | People leave instead of being deleted: `users.left_on` / `left_reason`, `student_profiles.last_class_id` / `last_section_id`; foreign keys to users that used to `CASCADE` become `SET NULL` (who wrote it) or `RESTRICT` (whose record it is). Additive; no data changes. |
+| `0014_login_captcha` | `auth_login_attempts.device_id` + index, `auth_captchas` (picture challenges, stored as a keyed hash). |
+| `0015_exam_subject_marks` | `exams.max_marks`, `exam_results.subject` (`''` = whole exam, as before) + `max_marks`, one result per exam + student + subject. Existing marks stay as whole-exam marks. |
+| `0016_durable_jobs` | `background_jobs` (push / email queue), `scheduled_runs` (once-a-day tasks across servers), index `notifications(created_at)`. |
 
 **First upgrade of an existing database** (your TiDB):
 
@@ -161,9 +166,9 @@ EMAIL_FROM="Green Valley School <no-reply@greenvalley.edu.in>"
 ```
 
 Set up SPF and DKIM for the sending domain (the provider shows the DNS
-records), or codes land in spam. Emails are sent in the background after the
-database change commits and are retried three times; failures are logged and
-reported to Sentry. Without `SMTP_HOST`, nothing is sent: in development the
+records), or codes land in spam. Emails are queued in the database together
+with the change that caused them (see "Background jobs") and tried up to four
+times; failures are logged and reported to Sentry. Without `SMTP_HOST`, nothing is sent: in development the
 whole email (with the code) is printed to the log, in production only a warning.
 
 `python -m app.cli check-data` lists active accounts without an email; those
@@ -211,6 +216,45 @@ request id and user id; request bodies are never sent (they can contain
 passwords). `SENTRY_TRACES_SAMPLE_RATE=0.05` adds performance tracing for 5%
 of requests.
 
+## Background jobs (push, email) — survive restarts
+
+Push notifications, emails and password-reset lookups are rows in
+`background_jobs`, written in the same transaction as the change that caused
+them (a rolled-back change sends nothing). Payloads are encrypted (Fernet, key
+derived from `SECRET_KEY`) and cleared when the job finishes. A worker thread
+inside each API process (`JOBS_WORKER=true`, default) picks due jobs every
+`JOBS_POLL_SECONDS` (5); several servers share the queue safely. A job that
+fails is retried after 10 s, 1 min, 5 min, 30 min, 2 h, then kept as `failed`;
+one left `running` longer than `JOBS_STUCK_MINUTES` (10 — the process died) runs
+again. So a restart, deploy or Render sleep delays a push instead of losing it.
+
+```bash
+python -m app.cli run-jobs [--forever]   # run due jobs (a separate worker: set JOBS_WORKER=false on the API)
+python -m app.cli retry-failed-jobs      # give failed jobs another round
+POST /internal/jobs/run                  # same as run-jobs, for a cron service (header X-Jobs-Secret)
+```
+
+`/platform/system` (owner portal) shows `jobs: {pending, running, failed,
+oldest_due_at, worker_in_api}`.
+
+## Data retention (old rows are cleaned up)
+
+Once a day the job worker (the API's thread, or `run-jobs --forever`;
+`scheduled_runs` makes it once across servers; `RETENTION_ENABLED=true` by
+default) deletes old rows in batches:
+
+| Table | Kept for |
+|---|---|
+| `notifications` (in-app inbox) | `NOTIFICATIONS_RETENTION_DAYS` = 180 (min 7) |
+| `audit_logs` | `AUDIT_RETENTION_DAYS` = 730 (min 365 — DPDP Rules: logs at least a year) |
+| finished `background_jobs` | `JOBS_RETENTION_DAYS` = 14 (failed ones 90) |
+| `auth_sessions` unused | max(365, `REFRESH_TOKEN_MAX_DAYS` + 1) days |
+| login attempts, reset requests / codes | 30 days |
+| `auth_captchas` | 1 day after they expire |
+
+`python -m app.cli cleanup` or `POST /internal/jobs/cleanup` runs it now.
+Set the numbers before the first deploy if your school's policy needs longer.
+
 ## Health checks
 
 * `GET /health` — process is up (use for liveness / container health).
@@ -236,7 +280,7 @@ network hop per request instead of several.
 
 What is already in place:
 
-* Stateless API: sessions, login throttling and audit live in the database.
+* Stateless API: sessions, login throttling, CAPTCHAs, the job queue and audit live in the database.
 * Connection pool per worker (`DB_POOL_SIZE` + `DB_POOL_MAX_OVERFLOW`).
   Total connections ≈ servers × `WEB_CONCURRENCY` × (pool size + overflow) —
   keep that under the database's connection limit.

@@ -9,7 +9,7 @@ from app.core.security import hash_password
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.users import StaffCreate, StaffUpdate, TeacherInfoUpdate
-from app.services import access, audit, pagination, storage
+from app.services import access, audit, leaving, pagination, storage
 
 ONLY_ADMIN_CREATES = "Only admin can create admin/principal/sub-admin accounts"
 
@@ -17,7 +17,8 @@ ONLY_ADMIN_CREATES = "Only admin can create admin/principal/sub-admin accounts"
 def ensure_no_other_principal(db: Db, user_id: int | None = None) -> None:
     """There is only one principal. (A UNIQUE index enforces the same rule in
     the database, for requests that race past this check.)"""
-    row = db.one("SELECT id, username FROM users WHERE org_id = %s AND user_type = 'principal' LIMIT 1", (db.org,))
+    row = db.one("SELECT id, username FROM users WHERE org_id = %s AND user_type = 'principal' "
+                 "AND left_on IS NULL LIMIT 1", (db.org,))
     if row and row["id"] != user_id:
         raise Conflict(f"There is already a principal ({row['username']}). Only one principal is allowed.")
 
@@ -29,8 +30,9 @@ def create_staff(db: Db, actor: CurrentUser, body: StaffCreate) -> dict:
     with db.transaction():
         if body.user_type == "principal":
             ensure_no_other_principal(db)
-        if db.one("SELECT id FROM users WHERE org_id = %s AND username = %s", (db.org, body.username)):
-            raise Conflict("Username already exists")
+        taken = leaving.username_taken(db, body.username)
+        if taken:
+            raise Conflict(taken)
         try:
             user_id = db.execute(
                 "INSERT INTO users (org_id, username, password_hash, full_name, email, phone, user_type) "
@@ -77,10 +79,18 @@ def update_staff(db: Db, actor: CurrentUser, user_id: int, body: StaffUpdate) ->
     return {"updated": user_id}
 
 
-def list_users(db: Db, user_type: str | None, page: pagination.Page | None = None) -> pagination.PageResult:
+STATUS_FILTERS = {
+    "active": " AND left_on IS NULL",  # default: everyone who hasn't left (disabled accounts included)
+    "left": " AND left_on IS NOT NULL",
+    "all": "",
+}
+
+
+def list_users(db: Db, user_type: str | None, page: pagination.Page | None = None,
+               status: str = "active") -> pagination.PageResult:
     sql = (
-        "SELECT id, username, full_name, email, phone, photo_path, user_type, is_active, created_at "
-        "FROM users WHERE org_id = %s"
+        "SELECT id, username, full_name, email, phone, photo_path, user_type, is_active, left_on, left_reason, "
+        "created_at FROM users WHERE org_id = %s"
     )
     params: tuple = (db.org,)
     if user_type:
@@ -88,25 +98,13 @@ def list_users(db: Db, user_type: str | None, page: pagination.Page | None = Non
         params = (db.org, user_type)
     else:
         sql += " AND user_type != 'student'"
+    sql += STATUS_FILTERS[status]
     return pagination.fetch(db, sql, params, "user_type, full_name, id", page)
 
 
-def delete_user(db: Db, actor: CurrentUser, user_id: int) -> dict:
-    if user_id == actor.id:
-        raise BadRequest("Cannot delete yourself")
-    with db.transaction():
-        target = db.one("SELECT user_type, username, photo_path FROM users WHERE id = %s AND org_id = %s FOR UPDATE",
-                        (user_id, db.org))
-        if not target:
-            raise NotFound("User not found")
-        # deleting mirrors creating: admin/principal/sub_admin accounts are admin-only
-        if target["user_type"] in ADMIN_MANAGED and actor.user_type != "admin":
-            raise Forbidden("Only admin can delete this account")
-        db.execute("DELETE FROM users WHERE id = %s", (user_id,))
-        storage.delete_after_commit(db, target["photo_path"])
-        audit.record(db, actor, "user.delete", "user", user_id,
-                     {"username": target["username"], "user_type": target["user_type"]})
-    return {"deleted": user_id}
+def delete_user(db: Db, actor: CurrentUser, user_id: int, reason: str | None = None) -> dict:
+    """DELETE /users/{id}: the account is marked as left, never deleted (see services/leaving.py)."""
+    return leaving.mark_left(db, actor, user_id, reason)
 
 
 def upload_photo(db: Db, actor: CurrentUser, user_id: int, file: UploadFile) -> dict:
@@ -130,11 +128,11 @@ def upload_photo(db: Db, actor: CurrentUser, user_id: int, file: UploadFile) -> 
 
 def list_teachers(db: Db) -> list[dict]:
     return db.all(
-        "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.photo_path, u.is_active, "
+        "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.photo_path, u.is_active, u.left_on, "
         "t.designation, t.subject, t.qualification, t.joining_date, t.address, "
         "(SELECT COUNT(*) FROM lesson_plans lp WHERE lp.teacher_id = u.id) AS lesson_plan_count "
         "FROM users u LEFT JOIN teacher_profiles t ON t.user_id = u.id "
-        "WHERE u.org_id = %s AND u.user_type = 'teacher' ORDER BY u.full_name",
+        "WHERE u.org_id = %s AND u.user_type = 'teacher' AND u.left_on IS NULL ORDER BY u.full_name",
         (db.org,),
     )
 

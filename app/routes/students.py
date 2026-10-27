@@ -7,7 +7,7 @@ Permissions:
 """
 from fastapi import APIRouter, Depends, Query, Response
 
-from app.core.roles import STAFF
+from app.core.roles import MANAGERS, STAFF
 from app.db import Db
 from app.dependencies import get_db, page_params, paged, require_roles
 from app.models.auth import CurrentUser
@@ -19,12 +19,14 @@ from app.models.students import (
     StudentCreate,
     StudentUpdate,
 )
+from app.services import leaving
 from app.services import students as student_service
 from app.services.pagination import Page
 
 router = APIRouter(prefix="/students", tags=["students"])
 
 staff = require_roles(*STAFF)
+manager = require_roles(*MANAGERS)
 
 HomeworkScope = Query(None, pattern="^(class|student)$", description="class = a class homework (/homework)")
 
@@ -39,11 +41,14 @@ def list_students(
     response: Response,
     class_id: int | None = None,
     section_id: int | None = None,
+    status: str = Query("active", pattern="^(active|left|all)$",
+                        description="active (default) · left (marked as left; managers only) · all"),
+    q: str | None = Query(None, max_length=100, description="Name, username, admission or roll number"),
     page: Page = Depends(page_params),
     user: CurrentUser = Depends(staff),
     db: Db = Depends(get_db),
 ):
-    return paged(response, student_service.list_students(db, user, class_id, section_id, page))
+    return paged(response, student_service.list_students(db, user, class_id, section_id, page, status, q))
 
 
 @router.get("/{student_id}")
@@ -58,8 +63,18 @@ def update_student(student_id: int, body: StudentUpdate, user: CurrentUser = Dep
 
 
 @router.delete("/{student_id}")
-def delete_student(student_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
-    return student_service.delete_student(db, user, student_id)
+def delete_student(student_id: int, reason: str | None = Query(None, max_length=255),
+                   user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """Managers: mark the student as left (TC issued, moved away…). Fees,
+    payments, marks and attendance are kept; the student leaves class lists."""
+    return student_service.delete_student(db, user, student_id, reason)
+
+
+@router.post("/{student_id}/reactivate")
+def reactivate_student(student_id: int, user: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
+    """Bring a left student back (into their last section when it still exists)."""
+    student_service.get_student(db, student_id)
+    return leaving.reactivate(db, user, student_id)
 
 
 # ================= attendance history =================

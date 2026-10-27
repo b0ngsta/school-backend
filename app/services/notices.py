@@ -35,7 +35,7 @@ def _notify_everyone(db: Db, actor: CurrentUser, body: NoticeCreate) -> None:
 def list_notices(db: Db, page: pagination.Page | None = None) -> pagination.PageResult:
     return pagination.fetch(
         db,
-        "SELECT n.*, u.full_name AS posted_by FROM notices n JOIN users u ON u.id = n.created_by "
+        "SELECT n.*, u.full_name AS posted_by FROM notices n LEFT JOIN users u ON u.id = n.created_by "
         "WHERE n.org_id = %s",
         (db.org,),
         "n.created_at DESC, n.id DESC",

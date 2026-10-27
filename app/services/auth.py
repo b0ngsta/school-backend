@@ -18,11 +18,11 @@ from __future__ import annotations
 
 from app.core import security
 from app.core.clock import utcnow
-from app.core.context import client_ip
+from app.core.context import client_ip, device_id
 from app.core.errors import BadRequest, Forbidden, Unauthorized
 from app.db import Db
 from app.models.auth import CurrentUser, TokenResponse
-from app.services import audit, login_throttle, notifications, organisations, sessions
+from app.services import audit, captcha, login_throttle, notifications, organisations, sessions
 
 INVALID_CREDENTIALS = "Invalid username or password"
 INVALID_TOKEN = "Invalid or expired token"
@@ -57,40 +57,45 @@ def token_response(user: dict, session: sessions.IssuedSession) -> TokenResponse
 
 # ------------------------------------------------------------------ login
 
-def login(db: Db, username: str, password: str, org_code: str | None = None) -> TokenResponse:
+def login(db: Db, username: str, password: str, org_code: str | None = None,
+          captcha_id: str | None = None, captcha_answer: str | None = None,
+          captcha_supported: bool = False) -> TokenResponse:
     org = organisations.resolve(db, org_code)
-    key, ip = login_throttle.account_key(org["id"], username), client_ip()
-    login_throttle.ensure_allowed(db, key, ip)
+    key, ip, device = login_throttle.account_key(org["id"], username), client_ip(), device_id()
+    if login_throttle.assess(db, key, ip, device, captcha_supported).captcha_required:
+        captcha.verify(db, captcha_id, captcha_answer)  # 428 until the picture is solved
 
     user = db.one(
-        "SELECT id, password_hash, full_name, user_type, is_active, token_version, must_change_password, org_id "
+        "SELECT id, password_hash, full_name, user_type, is_active, left_on, token_version, must_change_password, "
+        "org_id "
         "FROM users WHERE org_id = %s AND username = %s",
         (org["id"], username),
     )
     if user is None:
         security.burn_password_check(password)
-        _record_failure(db, key, ip)
+        _record_failure(db, key, ip, device)
         raise _invalid_credentials()
 
     matches, needs_rehash = security.verify_password(password, user["password_hash"])
     if not matches:
-        _record_failure(db, key, ip)
+        _record_failure(db, key, ip, device)
         raise _invalid_credentials()
     if not user["is_active"]:
-        raise Forbidden("Account disabled")
+        raise Forbidden("This account is marked as left the school. Contact the school office."
+                        if user["left_on"] else "Account disabled")
 
     with db.transaction():
         if needs_rehash:  # upgrade legacy SHA-256 hashes to Argon2 transparently
             db.execute("UPDATE users SET password_hash = %s WHERE id = %s",
                        (security.hash_password(password), user["id"]))
-        login_throttle.record(db, key, ip, success=True)
+        login_throttle.record(db, key, ip, success=True, device=device)
         session = sessions.open_session(db, user["id"])
     return token_response({**user, "org_code": org["code"], "org_name": org["name"]}, session)
 
 
-def _record_failure(db: Db, key: str, ip: str | None) -> None:
+def _record_failure(db: Db, key: str, ip: str | None, device: str | None = None) -> None:
     with db.transaction():
-        login_throttle.record(db, key, ip, success=False)
+        login_throttle.record(db, key, ip, success=False, device=device)
 
 
 # --------------------------------------------------------- access tokens
@@ -175,13 +180,13 @@ def logout_everywhere(db: Db, user: CurrentUser) -> None:
 def change_password(db: Db, user: CurrentUser, current_password: str, new_password: str) -> TokenResponse:
     """Change the caller's password, sign out every other device and return
     fresh tokens for this one."""
-    key, ip = login_throttle.account_key(user.org_id, user.username), client_ip()
-    login_throttle.ensure_allowed(db, key, ip)
+    key, ip, device = login_throttle.account_key(user.org_id, user.username), client_ip(), device_id()
+    login_throttle.ensure_allowed(db, key, ip, device)
 
     row = db.one("SELECT password_hash FROM users WHERE id = %s", (user.id,))
     matches, _ = security.verify_password(current_password, row["password_hash"]) if row else (False, False)
     if not matches:
-        _record_failure(db, key, ip)
+        _record_failure(db, key, ip, device)
         raise BadRequest("Current password is incorrect")
     if current_password == new_password:
         raise BadRequest("New password must be different from the current one")

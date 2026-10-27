@@ -228,7 +228,7 @@ def _mark_duplicate_usernames(rows: list[RowPlan]) -> None:
 # ----------------------------------------------------- existing accounts
 
 EXISTING_SQL = (
-    "SELECT u.id, u.username, u.user_type, u.full_name, u.email, u.phone, u.photo_path, "
+    "SELECT u.id, u.username, u.user_type, u.full_name, u.email, u.phone, u.photo_path, u.left_on, "
     "sp.user_id AS sp_user_id, sp.class_id, sp.section_id, sp.roll_no, sp.admission_no, sp.dob, "
     "sp.father_name, sp.mother_name, sp.guardian_phone, sp.address AS sp_address, "
     "c.name AS class_name, s.name AS section_name, "
@@ -268,6 +268,9 @@ def _decide(row: RowPlan, user: dict | None, plan: Plan) -> None:
     if user["user_type"] != plan.user_type:
         kind = user["user_type"].replace("_", "-")
         row.errors.append(f"Username '{row.username}' is already used by a {kind} account.")
+        return
+    if user.get("left_on"):
+        row.errors.append(f"{user['full_name']} is marked as left. Reactivate the account first, then upload again.")
         return
     if plan.user_type == "student":
         target = plan.section

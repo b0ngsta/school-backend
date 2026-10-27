@@ -100,6 +100,7 @@ def request_code(db: Db, login: str, org_code: str | None = None) -> int:
     return settings.reset_code_ttl_minutes * 60
 
 
+@background.task
 def _handle_request(org_id: int, login: str, ip: str | None, now: datetime) -> None:
     db = Db(pool)
     try:

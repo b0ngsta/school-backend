@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 
-from app.core.errors import BadRequest, Conflict, DuplicateKey, NotFound
+from app.core.errors import BadRequest, Conflict, DuplicateKey, Forbidden, NotFound
+from app.core.roles import MANAGERS
 from app.core.security import hash_password
 from app.db import Db
 from app.models.auth import CurrentUser
@@ -21,19 +22,26 @@ from app.models.students import (
     StudentCreate,
     StudentUpdate,
 )
-from app.services import access, audit, homework, pagination, storage
+from app.services import access, audit, homework, leaving, pagination
 
 STUDENT_SELECT = (
     "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.photo_path, u.is_active, "
+    "u.left_on, u.left_reason, "
     "sp.class_id, sp.section_id, sp.roll_no, sp.admission_no, sp.dob, "
     "sp.father_name, sp.mother_name, sp.guardian_phone, sp.address, "
-    "c.name AS class_name, s.name AS section_name "
+    "c.name AS class_name, s.name AS section_name, "
+    "sp.last_class_id, sp.last_section_id, lc.name AS last_class_name, ls.name AS last_section_name "
     "FROM users u "
     "LEFT JOIN student_profiles sp ON sp.user_id = u.id "
     "LEFT JOIN classes c ON c.id = sp.class_id "
     "LEFT JOIN sections s ON s.id = sp.section_id "
+    "LEFT JOIN classes lc ON lc.id = sp.last_class_id "
+    "LEFT JOIN sections ls ON ls.id = sp.last_section_id "
     "WHERE u.org_id = %s AND u.user_type = 'student'"
 )
+
+# ?status= on GET /students: left students drop out of class lists but stay findable
+STATUS_FILTERS = {"active": " AND u.left_on IS NULL", "left": " AND u.left_on IS NOT NULL", "all": ""}
 
 _PROFILE_FIELDS = ("roll_no", "admission_no", "dob", "father_name", "mother_name", "guardian_phone", "address")
 
@@ -63,8 +71,9 @@ def create_student(db: Db, actor: CurrentUser, body: StudentCreate) -> dict:
     with db.transaction():
         access.ensure_can_edit_students(db, actor, body.class_id, body.section_id)
         _ensure_section_in_class(db, body.class_id, body.section_id)
-        if db.one("SELECT id FROM users WHERE org_id = %s AND username = %s", (db.org, body.username)):
-            raise Conflict("Username already exists")
+        taken = leaving.username_taken(db, body.username)
+        if taken:
+            raise Conflict(taken)
         try:
             student_id = db.execute(
                 "INSERT INTO users (org_id, username, password_hash, full_name, email, phone, user_type) "
@@ -87,18 +96,25 @@ def create_student(db: Db, actor: CurrentUser, body: StudentCreate) -> dict:
 
 
 def list_students(db: Db, user: CurrentUser, class_id: int | None, section_id: int | None,
-                  page: pagination.Page | None = None) -> pagination.PageResult:
+                  page: pagination.Page | None = None, status: str = "active",
+                  query: str | None = None) -> pagination.PageResult:
     if user.user_type == "teacher":
         if class_id is None or section_id is None:
             raise BadRequest("class_id and section_id required")
         access.ensure_can_view_section(db, user, class_id, section_id)
-    sql, params = STUDENT_SELECT, [db.org]
+        status = "active"  # left students are the office's business
+    sql, params = STUDENT_SELECT + STATUS_FILTERS[status], [db.org]
     if class_id is not None:
-        sql += " AND sp.class_id = %s"
+        sql += " AND COALESCE(sp.class_id, sp.last_class_id) = %s"
         params.append(class_id)
     if section_id is not None:
-        sql += " AND sp.section_id = %s"
+        sql += " AND COALESCE(sp.section_id, sp.last_section_id) = %s"
         params.append(section_id)
+    if query and query.strip():
+        like = "%" + query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        sql += (" AND (u.full_name LIKE %s OR u.username LIKE %s OR sp.admission_no LIKE %s "
+                "OR sp.roll_no = %s)")
+        params.extend([like, like, like, query.strip()])
     return pagination.fetch(db, sql, params, "CAST(sp.roll_no AS UNSIGNED), u.full_name, u.id", page)
 
 
@@ -113,6 +129,8 @@ def update_student(db: Db, user: CurrentUser, student_id: int, body: StudentUpda
     with db.transaction():
         student = get_student(db, student_id)
         access.ensure_can_edit_students(db, user, student["class_id"], student["section_id"])
+        if student["left_on"] and (changes.get("class_id") is not None or changes.get("section_id") is not None):
+            raise Conflict("This student is marked as left. Reactivate them before moving them to a class.")
 
         new_class = changes.get("class_id") if changes.get("class_id") is not None else student["class_id"]
         new_section = changes.get("section_id") if changes.get("section_id") is not None else student["section_id"]
@@ -136,15 +154,13 @@ def update_student(db: Db, user: CurrentUser, student_id: int, body: StudentUpda
     return {"updated": student_id}
 
 
-def delete_student(db: Db, user: CurrentUser, student_id: int) -> dict:
-    with db.transaction():
-        student = get_student(db, student_id)
-        access.ensure_can_edit_students(db, user, student["class_id"], student["section_id"])
-        db.execute("DELETE FROM users WHERE id = %s", (student_id,))
-        storage.delete_after_commit(db, student["photo_path"])
-        audit.record(db, user, "student.delete", "user", student_id,
-                     {"username": student["username"], "full_name": student["full_name"]})
-    return {"deleted": student_id}
+def delete_student(db: Db, user: CurrentUser, student_id: int, reason: str | None = None) -> dict:
+    """DELETE /students/{id}: managers mark the student as left; nothing is
+    deleted (fees, payments, marks and attendance stay; services/leaving.py)."""
+    if user.user_type not in MANAGERS:
+        raise Forbidden("Only the school office can mark a student as left")
+    get_student(db, student_id)
+    return leaving.mark_left(db, user, student_id, reason)
 
 
 # ================= attendance history =================
@@ -237,7 +253,7 @@ def list_remarks(db: Db, user: CurrentUser, student_id: int) -> list[dict]:
     _viewable_student(db, user, student_id)
     return db.all(
         "SELECT r.*, u.full_name AS created_by_name FROM student_remarks r "
-        "JOIN users u ON u.id = r.created_by "
+        "LEFT JOIN users u ON u.id = r.created_by "
         "WHERE r.student_id = %s ORDER BY r.created_at DESC",
         (student_id,),
     )
@@ -266,7 +282,7 @@ def list_report_cards(db: Db, user: CurrentUser, student_id: int) -> list[dict]:
     _viewable_student(db, user, student_id)
     rows = db.all(
         "SELECT rc.*, u.full_name AS created_by_name FROM report_cards rc "
-        "JOIN users u ON u.id = rc.created_by "
+        "LEFT JOIN users u ON u.id = rc.created_by "
         "WHERE rc.student_id = %s ORDER BY rc.created_at DESC",
         (student_id,),
     )

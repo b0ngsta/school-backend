@@ -37,7 +37,8 @@ def list_vehicles(db: Db) -> list[dict]:
 
 def _check_driver(db: Db, driver_id: int | None) -> None:
     if driver_id is not None and not db.one(
-            "SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'driver'", (driver_id, db.org)):
+            "SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'driver' AND left_on IS NULL",
+            (driver_id, db.org)):
         raise NotFound("Driver account not found")
 
 
@@ -117,8 +118,8 @@ def assign_student(db: Db, vehicle_id: int, student_id: int, body: StudentTransp
     """Put a student on this vehicle (moves them off any other one)."""
     with db.transaction():
         _vehicle(db, vehicle_id)
-        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'student'",
-                      (student_id, db.org)):
+        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'student' "
+                      "AND left_on IS NULL", (student_id, db.org)):
             raise NotFound("Student not found")
         db.execute(
             "INSERT INTO student_transport (student_id, org_id, vehicle_id, stop_name, pickup_time, drop_time) "

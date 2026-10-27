@@ -20,9 +20,11 @@ init_sentry(settings)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if settings.jobs_worker:
+        background.start_worker()  # runs stored background jobs + the daily clean-up
     yield
-    background.shutdown()  # finish queued jobs, then
-    email.shutdown()       # let queued emails go out
+    background.shutdown()  # stop the worker (an interrupted job runs again later), then
+    email.shutdown()
     pool.close_all()
 
 

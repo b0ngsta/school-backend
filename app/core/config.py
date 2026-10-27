@@ -38,8 +38,13 @@ class Settings:
     max_sessions_per_user: int
     login_window_minutes: int
     login_max_failures_per_account: int
-    login_max_failures_per_ip: int
-    login_max_failures_per_account_ip: int
+    login_max_failures_per_ip: int              # one address, for apps that can't show a CAPTCHA (older builds)
+    login_ip_flood_limit: int                   # one address, for apps that show a CAPTCHA instead of refusing
+    login_max_failures_per_account_device: int  # one device guessing one account
+    login_captcha_after_account_failures: int
+    login_captcha_after_ip_failures: int
+    captcha_ttl_seconds: int
+    captcha_max_per_ip: int                     # pictures per address per login window
     enforce_password_change: bool
     require_user_email: bool
 
@@ -94,6 +99,15 @@ class Settings:
     # push notifications + scheduled jobs
     firebase_credentials: str     # service-account JSON (a file path or the JSON itself); "" = no push
     jobs_secret: str              # X-Jobs-Secret for POST /internal/jobs/*; "" = jobs endpoint off
+
+    # durable background jobs (services/background.py) and the daily clean-up (services/retention.py)
+    jobs_worker: bool             # run due jobs on a thread in this process (false: `python -m app.cli run-jobs`)
+    jobs_poll_seconds: int
+    jobs_stuck_minutes: int       # a job "running" longer than this was interrupted: run it again
+    retention_enabled: bool
+    notifications_retention_days: int
+    audit_retention_days: int     # DPDP Rules: keep logs at least a year
+    jobs_retention_days: int
 
     # organisations (schools)
     default_org_code: str         # school used when a login/reset request names none; "" = code required
@@ -187,7 +201,14 @@ def load_settings() -> Settings:
         login_window_minutes=env_int("LOGIN_WINDOW_MINUTES", 15, minimum=1),
         login_max_failures_per_account=env_int("LOGIN_MAX_FAILURES_PER_ACCOUNT", 10, minimum=1),
         login_max_failures_per_ip=env_int("LOGIN_MAX_FAILURES_PER_IP", 50, minimum=1),
-        login_max_failures_per_account_ip=env_int("LOGIN_MAX_FAILURES_PER_ACCOUNT_IP", 5, minimum=1),
+        login_ip_flood_limit=env_int("LOGIN_IP_FLOOD_LIMIT", 500, minimum=1),
+        login_max_failures_per_account_device=env_int(
+            "LOGIN_MAX_FAILURES_PER_ACCOUNT_DEVICE", env_int("LOGIN_MAX_FAILURES_PER_ACCOUNT_IP", 5, minimum=1),
+            minimum=1),
+        login_captcha_after_account_failures=env_int("LOGIN_CAPTCHA_AFTER_ACCOUNT_FAILURES", 3, minimum=1),
+        login_captcha_after_ip_failures=env_int("LOGIN_CAPTCHA_AFTER_IP_FAILURES", 20, minimum=1),
+        captcha_ttl_seconds=env_int("CAPTCHA_TTL_SECONDS", 300, minimum=30),
+        captcha_max_per_ip=env_int("CAPTCHA_MAX_PER_IP", 300, minimum=1),
         enforce_password_change=env_bool("ENFORCE_PASSWORD_CHANGE", False),
         require_user_email=env_bool("REQUIRE_USER_EMAIL", False),
         reset_code_ttl_minutes=env_int("RESET_CODE_TTL_MINUTES", 15, minimum=1),
@@ -228,6 +249,13 @@ def load_settings() -> Settings:
         enable_docs=env_bool("ENABLE_DOCS", env == "development"),
         firebase_credentials=env_str("FIREBASE_CREDENTIALS", ""),
         jobs_secret=env_str("JOBS_SECRET", ""),
+        jobs_worker=env_bool("JOBS_WORKER", True),
+        jobs_poll_seconds=env_int("JOBS_POLL_SECONDS", 5, minimum=1),
+        jobs_stuck_minutes=env_int("JOBS_STUCK_MINUTES", 10, minimum=1),
+        retention_enabled=env_bool("RETENTION_ENABLED", True),
+        notifications_retention_days=env_int("NOTIFICATIONS_RETENTION_DAYS", 180, minimum=7),
+        audit_retention_days=env_int("AUDIT_RETENTION_DAYS", 730, minimum=365),
+        jobs_retention_days=env_int("JOBS_RETENTION_DAYS", 14, minimum=1),
         default_org_code=env_str("DEFAULT_ORG_CODE", "DEFAULT").strip().upper(),
         platform_secret=platform_secret,
     )

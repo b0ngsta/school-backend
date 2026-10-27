@@ -64,10 +64,58 @@ The first five fields are unchanged, so existing screens keep working.
    access token is expired or about to expire, before the first screen loads.
 
 Other responses: `429` on login = too many failed attempts (respect the
-`Retry-After` header). `403 {"detail": "Password change required"}` only
+`Retry-After` header); `428` = solve the picture first (below). `403 {"detail": "Password change required"}` only
 appears if the server runs with `ENFORCE_PASSWORD_CHANGE=true`; send the user
 to a change-password screen (use `must_change_password` from the login
 response to show it right away).
+
+## Failed sign-ins: per account and device, then a picture (Oct 2026)
+
+Many parents share one public IP address (Jio / Airtel carrier NAT, school
+Wi-Fi), so failed sign-ins are no longer counted only per address:
+
+* Send a random **install / browser id** as `X-Device-Id` on every request
+  (8–64 letters, digits, `.`, `_`, `-`; keep it after sign-out). The web app
+  keeps it in `localStorage.device_id`, the Android app in AsyncStorage
+  `sw_device_id`.
+* Send `"captcha_supported": true` with `POST /auth/login`. After a few
+  failures (`LOGIN_CAPTCHA_AFTER_ACCOUNT_FAILURES`, default 3, for the
+  account; or `LOGIN_CAPTCHA_AFTER_IP_FAILURES`, default 20, from the address)
+  the server answers **`428 {"detail": "…", "code": "captcha_required"}`**
+  instead of locking anyone out. Then:
+
+```http
+POST /auth/captcha   → {"captcha_id", "image": "data:image/png;base64,…", "expires_in": 300, "length": 5}
+POST /auth/login     {"org_code", "username", "password", "captcha_supported": true,
+                      "captcha_id": "…", "captcha_answer": "ABCDE"}
+```
+
+  Each picture works for **one** try (right or wrong password): after any
+  failure show a new one. A wrong answer → `428 … "code": "captcha_invalid"`.
+  Answers ignore case and spaces.
+* Hard limits that remain: one device guessing one account
+  (`LOGIN_MAX_FAILURES_PER_ACCOUNT_DEVICE`, default 5 → `429` for that device
+  only), and a flood guard per address (`LOGIN_IP_FLOOD_LIMIT`, default 500 per
+  window). The right password from another phone on the same address keeps
+  working.
+* **Older apps** that don't send `captcha_supported` keep the original rules
+  (`LOGIN_MAX_FAILURES_PER_IP` 50 per address), so they never see a `428`
+  they can't handle.
+
+Accounts marked as **left the school** (see below) get
+`403 "This account is marked as left the school. Contact the school office."`
+
+## People leaving: nothing is deleted any more
+
+`DELETE /users/{id}` and `DELETE /students/{id}` (optional `?reason=`) now
+**mark the account as left** (`left_on`, `left_reason`): it can't sign in, is
+signed out everywhere, leaves class lists, buses and timetables — and every
+record by or about the person (attendance, fees, claims, payments, marks,
+remarks, salary, notices…) is kept. `POST /users/{id}/reactivate` /
+`POST /students/{id}/reactivate` undo it. Lists take `?status=active|left|all`
+(default `active`). Only the office (managers) can mark a student as left;
+foreign keys are `RESTRICT` / `SET NULL` (migration 0013), so a hard delete
+can no longer wipe other people's records.
 
 ## Forgot password
 
