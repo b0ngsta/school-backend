@@ -11,13 +11,13 @@ and two phones on the same parent login each keep their own dots.
       "server_time": "2026-10-25T18:50:00+05:30",
       "sections": {
         "homework": {"latest_at": "2026-10-25T10:12:03+05:30"},
-        "messages": {"latest_at": "2026-10-24T16:01:00+05:30", "unread": 2},
+        "remarks":  {"latest_at": "2026-10-24T16:01:00+05:30"},
         "events":   {"latest_at": null},
         ...
       }
     }
 
-Section keys depend on the role (students: homework, notices, messages,
+Section keys depend on the role (students: homework, notices, class_announcements, remarks,
 timetable, syllabus, events, attendance, fees, exams, report_cards,
 holidays, transport — staff: notices, holidays, leaves, substitutions and,
 by role, timetable, salary, fee_claims). Every key is always present for
@@ -36,8 +36,8 @@ from app.core.roles import MANAGERS
 from app.db import Db
 from app.models.auth import CurrentUser
 
-STUDENT_SECTIONS = ("homework", "notices", "messages", "timetable", "syllabus", "events", "attendance", "fees",
-                    "exams", "report_cards", "holidays", "transport")
+STUDENT_SECTIONS = ("homework", "notices", "class_announcements", "remarks", "timetable", "syllabus", "events",
+                    "attendance", "fees", "exams", "report_cards", "holidays", "transport")
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -72,11 +72,14 @@ def _student(db: Db, uid: int) -> dict:
         "(SELECT MAX(h.updated_at) FROM class_homework h "
         "  WHERE h.org_id = %(org)s AND h.class_id <=> %(cls)s AND h.section_id <=> %(sec)s) AS hw_class, "
         "(SELECT MAX(hw.updated_at) FROM homeworks hw WHERE hw.student_id = %(uid)s) AS hw_own, "
-        "(SELECT MAX(n.created_at) FROM notices n WHERE n.org_id = %(org)s) AS notices, "
-        "(SELECT MAX(m.created_at) FROM message_recipients r JOIN messages m ON m.id = r.message_id "
-        "  WHERE r.student_id = %(uid)s AND m.org_id = %(org)s) AS messages, "
-        "(SELECT COUNT(*) FROM message_recipients r JOIN messages m ON m.id = r.message_id "
-        "  WHERE r.student_id = %(uid)s AND m.org_id = %(org)s AND r.read_at IS NULL) AS messages_unread, "
+        # school-wide notices + the ones for the student's class (0018)
+        "(SELECT MAX(n.created_at) FROM notices n WHERE n.org_id = %(org)s AND (n.audience = 'school' "
+        "  OR EXISTS (SELECT 1 FROM notice_classes nc WHERE nc.notice_id = n.id AND nc.class_id = %(cls)s))) "
+        "  AS notices, "
+        "(SELECT MAX(ca.created_at) FROM class_announcements ca WHERE ca.org_id = %(org)s AND EXISTS ("
+        "  SELECT 1 FROM class_announcement_sections cs WHERE cs.announcement_id = ca.id "
+        "  AND cs.section_id = %(sec)s)) AS class_announcements, "
+        "(SELECT MAX(r.created_at) FROM student_remarks r WHERE r.student_id = %(uid)s) AS remarks, "
         f"(SELECT MAX(d.updated_at) FROM school_documents d WHERE d.kind = 'timetable' AND {doc_scope}) AS tt_docs, "
         "(SELECT MAX(ts.updated_at) FROM timetable_slots ts "
         "  WHERE ts.org_id = %(org)s AND ts.section_id <=> %(sec)s) AS tt_slots, "
@@ -98,7 +101,8 @@ def _student(db: Db, uid: int) -> dict:
     latest = {
         "homework": _newest(row["hw_class"], row["hw_own"]),
         "notices": row["notices"],
-        "messages": row["messages"],
+        "class_announcements": row["class_announcements"],
+        "remarks": row["remarks"],
         "timetable": _newest(row["tt_docs"], row["tt_slots"]),
         "syllabus": row["syllabus"],
         "events": row["events"],
@@ -111,7 +115,6 @@ def _student(db: Db, uid: int) -> dict:
         "transport": row["transport"],
     }
     sections = {key: {"latest_at": _iso(latest[key])} for key in STUDENT_SECTIONS}
-    sections["messages"]["unread"] = int(row["messages_unread"] or 0)
     return sections
 
 
@@ -133,8 +136,13 @@ def _staff(db: Db, user: CurrentUser) -> dict:
     row = db.one(
         "SELECT "
         # someone else's notice (your own post isn't news to you)
-        "(SELECT MAX(n.created_at) FROM notices n WHERE n.org_id = %(org)s AND n.created_by <> %(uid)s) "
-        "  AS notices, "
+        "(SELECT MAX(n.created_at) FROM notices n WHERE n.org_id = %(org)s AND n.created_by <> %(uid)s"
+        + ("" if manager else
+           # teachers: school-wide + their classes' notices · drivers: school-wide (0018)
+           " AND (n.audience = 'school' OR EXISTS (SELECT 1 FROM notice_classes nc "
+           "JOIN teacher_assignments ta ON ta.class_id = nc.class_id "
+           "WHERE nc.notice_id = n.id AND ta.teacher_id = %(uid)s))")
+        + ")  AS notices, "
         "(SELECT MAX(ho.created_at) FROM holidays ho WHERE ho.org_id = %(org)s) AS holidays, "
         # managers: someone asked for leave · everyone else: your request was answered
         + ("(SELECT MAX(l.created_at) FROM leave_requests l WHERE l.org_id = %(org)s AND l.user_id <> %(uid)s) "

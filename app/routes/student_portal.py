@@ -12,7 +12,14 @@ from fastapi import APIRouter, Depends, Query, Response
 from app.db import Db
 from app.dependencies import get_db, page_params, paged, require_roles
 from app.models.auth import CurrentUser
-from app.services import announcements, documents, messages, performance, student_attendance, transport
+from app.services import (
+    announcements,
+    class_announcements,
+    documents,
+    performance,
+    student_attendance,
+    transport,
+)
 from app.services import student_portal as portal
 from app.services.pagination import Page
 
@@ -102,12 +109,24 @@ def student_calendar(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
 @router.get("/notices")
 def my_notices(response: Response, page: Page = Depends(page_params),
                user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
-    return paged(response, portal.notices(db, page))
+    return paged(response, portal.notices(db, user.id, page))
 
 
 @router.get("/notices/{notice_id}")
 def my_notice(notice_id: int, user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
-    return portal.notice(db, notice_id)
+    return portal.notice(db, user.id, notice_id)
+
+
+@router.get("/class-announcements")
+def my_class_announcements(response: Response, page: Page = Depends(page_params),
+                           user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
+    """Teachers' announcements to the student's section, newest first."""
+    return paged(response, class_announcements.list_for_student(db, user.id, page))
+
+
+@router.get("/class-announcements/{announcement_id}")
+def my_class_announcement(announcement_id: int, user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
+    return class_announcements.get_for_student(db, user.id, announcement_id)
 
 
 @router.get("/announcements")
@@ -140,23 +159,6 @@ def my_performance(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     """Session-wide performance report (published exam results only), for the
     app's Performance Report screen."""
     return performance.report(db, user.id)
-
-
-@router.get("/messages")
-def my_messages(response: Response, page: Page = Depends(page_params),
-                user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
-    return paged(response, messages.for_student(db, user.id, page))
-
-
-@router.get("/messages/unread-count")
-def my_unread_messages(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
-    return messages.unread_count(db, user.id)
-
-
-@router.get("/messages/{message_id}")
-def my_message(message_id: int, user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
-    """The message; opening it marks it read."""
-    return messages.open_for_student(db, user.id, message_id)
 
 
 @router.get("/transport")

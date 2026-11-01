@@ -1,6 +1,6 @@
 """Student-portal features: school profile, launch announcements, attendance
 overview, homework by date / subject with attachments, documents
-(timetable / syllabus), notices with attachments, messages, events,
+(timetable / syllabus), notices with attachments, events,
 transport and subject teachers."""
 from __future__ import annotations
 
@@ -265,52 +265,6 @@ def test_notices_by_any_manager_with_attachment(client, school, s1):
     assert _ok(client.get(f"/student/notices/{created['id']}", headers=s))["attachment_path"] is None
 
 
-# ------------------------------------------------------------------- messages
-
-def test_messages_permissions_targets_and_read_state(client, school, s1):
-    a, t1, t2 = bearer(school.admin), bearer(school.t1), bearer(school.t2)
-    # class teacher of 1-A: own students / own section only
-    one = _ok(client.post("/messages", headers=t1, json={"title": "PTM", "body": "PTM on 27-8",
-                                                         "student_ids": [school.s1]}), 201)
-    assert (one["audience"], one["audience_label"], one["recipients_count"]) == ("students", "Student 1", 1)
-    sec = _ok(client.post("/messages", headers=t1, json={"title": "Timetable", "body": "New timetable",
-                                                         "section_id": school.c1a}), 201)
-    assert sec["recipients_count"] == 2 and sec["audience_label"] == "Class 1 — A"
-    assert _ok(client.post("/messages", headers=t1, json={"title": "x", "body": "y",
-                                                          "student_ids": [school.s3]}), 403)
-    assert _ok(client.post("/messages", headers=t1, json={"title": "x", "body": "y", "class_id": school.c1}), 403)
-    assert _ok(client.post("/messages", headers=t2, json={"title": "x", "body": "y",
-                                                          "student_ids": [school.s1]}), 403)
-    assert _ok(client.post("/messages", headers=a, json={"title": "x", "body": "y"}), 422)
-    assert _ok(client.post("/messages", headers=a, json={"title": "x", "body": "y", "student_ids": [999999]}), 404)
-    everyone = _ok(client.post("/messages", headers=bearer(login(client, "principal")),
-                               json={"title": "Holiday", "body": "Closed", "whole_school": True}), 201)
-    assert everyone["recipients_count"] == 4
-
-    _ok(client.post(f"/messages/{one['id']}/attachment", headers=t1, files=_pdf()))
-    s = bearer(s1)
-    inbox = _ok(client.get("/student/messages", headers=s))
-    assert [m["title"] for m in inbox] == ["Holiday", "Timetable", "PTM"]
-    assert _ok(client.get("/student/messages/unread-count", headers=s)) == {"count": 3}
-    opened = _ok(client.get(f"/student/messages/{one['id']}", headers=s))
-    assert opened["read_at"] and opened["attachment_type"] == "pdf" and opened["sender_name"] == "Teacher 1"
-    assert _ok(client.get("/student/messages/unread-count", headers=s)) == {"count": 2}
-    # student 3 never got the section message
-    s3 = bearer(login(client, "student3", "studpass"))
-    assert _ok(client.get(f"/student/messages/{sec['id']}", headers=s3), 404)
-
-    # senders see theirs; managers see all
-    assert {m["id"] for m in _ok(client.get("/messages", headers=t1))} == {one["id"], sec["id"]}
-    assert len(_ok(client.get("/messages", headers=a))) == 3
-    recips = _ok(client.get(f"/messages/{one['id']}/recipients", headers=t1))
-    assert recips[0]["read_at"] is not None
-    assert _ok(client.get(f"/messages/{everyone['id']}", headers=t1), 404)
-    assert _ok(client.delete(f"/messages/{everyone['id']}", headers=t1), 404)
-    _ok(client.delete(f"/messages/{one['id']}", headers=t1), 204)
-
-
-# --------------------------------------------------------------------- events
-
 def test_events_upcoming_completed_and_media(client, school, s1):
     a, s = bearer(school.admin), bearer(s1)
     today = school_today()
@@ -397,7 +351,7 @@ def test_subject_teachers_of_the_section(client, school, s1):
 def test_new_student_endpoints_need_a_student(client, school):
     t = bearer(school.t1)
     for path in ("/student/announcements", "/student/attendance/overview", "/student/homework/subjects",
-                 "/student/syllabus", "/student/messages", "/student/transport", "/student/teachers"):
+                 "/student/syllabus", "/student/remarks", "/student/transport", "/student/teachers"):
         assert client.get(path, headers=t).status_code == 403, path
 
 
@@ -421,3 +375,25 @@ def test_dashboard_carries_the_school_header(client, school, s1):
     start, end = school_profile.session_bounds(4)
     assert dash["school"]["code"] == "DEFAULT"
     assert dash["school"]["session"] == school_profile.session_label(start, end)
+
+
+# ------------------------------------------------------------- teacher remarks
+
+def test_any_teacher_of_the_section_writes_remarks_parents_see_who(client, school, s1):
+    a = bearer(school.admin)
+    _ok(client.put(f"/users/teachers/{school.t2_id}", headers=a, json={"designation": "TGT"}))
+    # class teacher and subject teacher of 1-A both may write; 2-A's teacher may not
+    _ok(client.post(f"/students/{school.s1}/remarks", headers=bearer(school.t1), json={"remark": "Very polite"}), 201)
+    _ok(client.post(f"/students/{school.s1}/remarks", headers=bearer(school.t2),
+                    json={"remark": "Practise tables daily"}), 201)
+    _ok(client.post(f"/students/{school.s1}/remarks", headers=bearer(school.t3), json={"remark": "x"}), 403)
+    s = bearer(s1)
+    mine = _ok(client.get("/student/remarks", headers=s))
+    assert [r["remark"] for r in mine] == ["Practise tables daily", "Very polite"]
+    maths, ct = mine
+    assert maths["by_name"] == "Teacher 2" and maths["by_subjects"] == ["Math"] and maths["by_class_teacher"] is False
+    assert ct["by_name"] == "Teacher 1" and ct["by_class_teacher"] is True
+    assert "photo_path" in ct and "by_designation" in ct
+    pushes = [n for n in _ok(client.get("/notifications", headers=s)) if n["type"] == "remark"]
+    assert len(pushes) == 2 and pushes[0]["data"]["route"] == "Remarks"
+    assert _ok(client.get("/updates", headers=s))["sections"]["remarks"]["latest_at"] is not None

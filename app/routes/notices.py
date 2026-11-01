@@ -1,5 +1,6 @@
-"""Notices — posted by managers (admin, principal, sub-admin, coordinator),
-visible to all staff and to parents (/student/notices). A notice may carry
+"""Notices — posted by managers (admin, principal, sub-admin, coordinator) for
+the whole school or for chosen classes (`class_ids`); visible to staff and to
+parents (/student/notices) in scope (services/notices.py). A notice may carry
 one attachment (PDF or photo), e.g. the new timetable."""
 from fastapi import APIRouter, Depends, File, Response, UploadFile
 
@@ -25,7 +26,7 @@ def create_notice(body: NoticeCreate, actor: CurrentUser = Depends(poster), db: 
 @router.get("")
 def list_notices(response: Response, page: Page = Depends(page_params),
                  user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
-    return paged(response, notice_service.list_notices(db, page))
+    return paged(response, notice_service.list_notices(db, user, page))
 
 
 @router.delete("/{notice_id}")

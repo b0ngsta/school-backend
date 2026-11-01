@@ -11,6 +11,7 @@ from app.core.errors import NotFound
 from app.db import Db
 from app.services import documents, pagination
 from app.services import homework as class_homework
+from app.services import notices as notice_service
 from app.services.calendar import get_calendar_payload
 from app.services.hr import list_holidays
 from app.services.school_profile import session_bounds, session_label
@@ -87,11 +88,12 @@ def dashboard(db: Db, uid: int) -> dict:
             "ORDER BY start_date LIMIT 1",
             (db.org, me["class_id"]),
         )
+    scope, scope_params = notice_service.student_scope(db, uid)
     notices = db.all(
-        "SELECT n.id, n.title, n.created_at, u.full_name AS posted_by "
-        "FROM notices n LEFT JOIN users u ON u.id = n.created_by WHERE n.org_id = %s "
+        "SELECT n.id, n.title, n.created_at, u.full_name AS posted_by, n.audience, n.audience_label "
+        f"FROM notices n LEFT JOIN users u ON u.id = n.created_by WHERE n.org_id = %s AND {scope} "
         "ORDER BY n.created_at DESC LIMIT 3",
-        (db.org,),
+        (db.org, *scope_params),
     )
     school = db.one("SELECT name, code, logo_path, session_start_month FROM organisations WHERE id = %s", (db.org,))
     start, end = session_bounds(int(school.pop("session_start_month") or 4))
@@ -132,12 +134,32 @@ def homework_subjects(db: Db, uid: int) -> list[dict]:
 
 
 def remarks(db: Db, uid: int) -> list[dict]:
-    return db.all(
-        "SELECT r.id, r.remark, r.created_at, u.full_name AS by_name "
+    """What the child's teachers wrote, newest first, with who wrote it: name,
+    photo, designation and how they teach the child's section (class teacher /
+    subjects) — any teacher of the section may write one."""
+    me = db.one("SELECT section_id FROM student_profiles WHERE user_id = %s AND org_id = %s", (uid, db.org)) or {}
+    rows = db.all(
+        "SELECT r.id, r.remark, r.created_at, r.created_by, u.full_name AS by_name, u.photo_path, "
+        "u.user_type AS by_role, tp.designation AS by_designation "
         "FROM student_remarks r LEFT JOIN users u ON u.id = r.created_by "
-        "WHERE r.student_id = %s ORDER BY r.created_at DESC",
+        "LEFT JOIN teacher_profiles tp ON tp.user_id = r.created_by "
+        "WHERE r.student_id = %s ORDER BY r.created_at DESC, r.id DESC",
         (uid,),
     )
+    roles: dict[int, dict] = {}
+    if me.get("section_id"):
+        for a in db.all("SELECT teacher_id, role, subject FROM teacher_assignments "
+                        "WHERE org_id = %s AND section_id = %s", (db.org, me["section_id"])):
+            info = roles.setdefault(a["teacher_id"], {"class_teacher": False, "subjects": []})
+            if a["role"] == "class_teacher":
+                info["class_teacher"] = True
+            if a["subject"] and a["subject"] not in info["subjects"]:
+                info["subjects"].append(a["subject"])
+    for r in rows:
+        info = roles.get(r.pop("created_by"), {"class_teacher": False, "subjects": []})
+        r["by_class_teacher"] = info["class_teacher"]
+        r["by_subjects"] = info["subjects"]
+    return rows
 
 
 def report_cards(db: Db, uid: int) -> list[dict]:
@@ -257,17 +279,21 @@ def calendar(db: Db) -> dict:
 
 _NOTICE_SELECT = (
     "SELECT n.id, n.title, n.body, n.created_at, u.full_name AS posted_by, "
-    "n.attachment_path, n.attachment_name, n.attachment_type "
+    "n.attachment_path, n.attachment_name, n.attachment_type, n.audience, n.audience_label "
     "FROM notices n LEFT JOIN users u ON u.id = n.created_by WHERE n.org_id = %s"
 )
 
 
-def notices(db: Db, page: pagination.Page | None = None) -> pagination.PageResult:
-    return pagination.fetch(db, _NOTICE_SELECT, (db.org,), "n.created_at DESC, n.id DESC", page)
+def notices(db: Db, uid: int, page: pagination.Page | None = None) -> pagination.PageResult:
+    """School-wide notices + the ones for the student's class (migration 0018)."""
+    scope, params = notice_service.student_scope(db, uid)
+    return pagination.fetch(db, f"{_NOTICE_SELECT} AND {scope}", (db.org, *params),
+                            "n.created_at DESC, n.id DESC", page)
 
 
-def notice(db: Db, notice_id: int) -> dict:
-    row = db.one(_NOTICE_SELECT + " AND n.id = %s", (db.org, notice_id))
+def notice(db: Db, uid: int, notice_id: int) -> dict:
+    scope, params = notice_service.student_scope(db, uid)
+    row = db.one(f"{_NOTICE_SELECT} AND {scope} AND n.id = %s", (db.org, *params, notice_id))
     if not row:
         raise NotFound("Notice not found")
     return row

@@ -200,7 +200,8 @@ def first_name(full_name: str | None) -> str:
 
 STAFF_ROUTES = {"fee": "FeesAdmin", "notice": "StaffNotices", "leave": "Leaves"}
 STUDENT_ROUTES = {"attendance": "Attendance", "fee": "Fees", "notice": "Notices", "homework": "Homework",
-                  "timetable": "StudentTimetable", "syllabus": "Syllabus", "message": "Messages", "event": "Events"}
+                  "timetable": "StudentTimetable", "syllabus": "Syllabus", "event": "Events", "remark": "Remarks",
+                  "class_announcement": "ClassAnnouncements"}
 WEB_PATHS = {"fee": "/fees", "notice": "/notices", "leave": "/leaves"}
 
 

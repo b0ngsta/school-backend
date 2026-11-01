@@ -23,7 +23,7 @@ from app.models.students import (
     StudentCreate,
     StudentUpdate,
 )
-from app.services import access, audit, homework, leaving, pagination
+from app.services import access, audit, homework, leaving, notify, pagination
 
 STUDENT_SELECT = (
     "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.photo_path, u.is_active, "
@@ -265,10 +265,14 @@ def add_remark(db: Db, user: CurrentUser, student_id: int, body: RemarkCreate) -
     remark = body.remark.strip()
     if not remark:
         raise BadRequest("Remark is required")
-    remark_id = db.execute(
-        "INSERT INTO student_remarks (student_id, remark, created_by) VALUES (%s, %s, %s)",
-        (student_id, remark, user.id),
-    ).lastrowid
+    with db.transaction():
+        remark_id = db.execute(
+            "INSERT INTO student_remarks (student_id, remark, created_by) VALUES (%s, %s, %s)",
+            (student_id, remark, user.id),
+        ).lastrowid
+        # the parent app's Teacher Remarks screen (push → Remarks)
+        notify.notify(db, [student_id], "remark", f"📝 {notify.first_name(user.full_name) or 'Teacher'} wrote a remark",
+                      remark[:120], data=notify.route("remark", student=True))
     return {"id": remark_id}
 
 

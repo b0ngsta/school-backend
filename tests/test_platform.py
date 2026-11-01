@@ -87,7 +87,7 @@ def test_school_detail_is_one_school_only(client, schools):  # noqa: F811
     assert d["pending"] == {"leaves": 1, "fee_claims": 1, "substitutions": 1}
     assert d["fees"]["collected"] == 300.0 and d["fees"]["pending_claims"] == 1
     assert d["enquiries"]["new"] == 1
-    assert d["academics"]["exams_upcoming"] == 1 and d["academics"]["notices_30d"] == 1
+    assert d["academics"]["exams_upcoming"] == 1 and d["academics"]["notices_30d"] == 2  # + the class notice
     assert d["engagement"]["active_users"]["last_24h"] == 3
     assert [m["username"] for m in d["managers"]] == ["admin", "principal2"]
     assert d["managers"][0]["last_seen_at"] is not None
@@ -177,7 +177,7 @@ def test_school_changes_name_the_operator(client, actor, recorded):
 
 def test_system_status(client):
     s = _ok(client.get("/platform/system", headers=PLATFORM))
-    assert s["database"]["migration"] == "0017_protect_records"
+    assert s["database"]["migration"] == "0018_class_notices"
     assert s["database"]["ping_ms"] >= 0 and s["database"]["size_bytes"] > 0
     assert s["database"]["tables"] and all(t["bytes"] >= 0 for t in s["database"]["tables"])
     assert s["settings"]["default_org_code"] == "DEFAULT"
