@@ -94,7 +94,8 @@ def describe(actor: CurrentUser, user_type: str) -> dict:
 
 def template(actor: CurrentUser, user_type: str) -> tuple[bytes, str]:
     ensure_can_import_type(actor, user_type)
-    return csv_io.write([c.name for c in columns_for(user_type)], []), f"{user_type}_import_template.csv"
+    return csv_io.write_xlsx([c.name for c in columns_for(user_type)], [], _help(user_type)), \
+        f"{user_type}_import_template.xlsx"
 
 
 def export(db: Db, actor: CurrentUser, user_type: str, class_id: int | None,
@@ -123,8 +124,20 @@ def export(db: Db, actor: CurrentUser, user_type: str, class_id: int | None,
     audit.record(db, actor, "users.export", "user", None,
                  {"user_type": user_type, "section_id": section and section["section_id"], "count": len(users)})
     where = f"_{section['class_name']}-{section['section_name']}" if section else ""
-    filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{user_type}s{where}_{school_today().isoformat()}.csv")
-    return csv_io.write([c.name for c in columns], rows), filename
+    filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{user_type}s{where}_{school_today().isoformat()}.xlsx")
+    return csv_io.write_xlsx([c.name for c in columns], rows, _help(user_type)), filename
+
+
+def _help(user_type: str) -> list[str]:
+    cols = columns_for(user_type)
+    return [
+        f"How to fill the {user_type} import sheet",
+        "One user per row on the 'Users' sheet. Keep the column names in the first row as they are.",
+        "Required columns: " + ", ".join(c.name for c in cols if c.required) + ".",
+        "Phone numbers, roll and admission numbers are text cells, so leading zeros and + are kept.",
+        "Dates as YYYY-MM-DD (e.g. 2014-05-21). Save as Excel (.xlsx) and upload it: you see a preview "
+        "first, nothing is saved until you confirm.",
+    ]
 
 
 def _export_value(value: object) -> object:

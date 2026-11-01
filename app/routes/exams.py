@@ -11,8 +11,8 @@ from app.core.roles import MANAGERS, STAFF
 from app.db import Db
 from app.dependencies import get_db, require_roles
 from app.models.auth import CurrentUser
-from app.models.exams import ExamCreate, ExamUpdate, ResultsSave
-from app.services import exam_results_csv
+from app.models.exams import MARKS_LIMIT, ExamCreate, ExamUpdate, ResultsSave
+from app.services import exam_results_import, spreadsheet
 from app.services import exams as exam_service
 from app.storage.base import content_disposition
 
@@ -111,25 +111,30 @@ def exam_results(exam_id: int, section_id: int,
 @router.get("/{exam_id}/results/sheet")
 def results_sheet(exam_id: int, section_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
     """Every subject's marks for the section in one table (+ totals, % and `can_import`)."""
-    return exam_results_csv.sheet(db, user, exam_id, section_id)
+    return exam_results_import.sheet(db, user, exam_id, section_id)
 
 
 @router.get("/{exam_id}/results/template")
-def results_template(exam_id: int, section_id: int, format: str = Query("csv", pattern="^(csv|json)$"),
+def results_template(exam_id: int, section_id: int, format: str = Query("xlsx", pattern="^(xlsx|json)$"),
                      user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
-    """CSV to fill in (class teacher / managers). `format=json` → {filename, content} for the mobile app."""
-    filename, content = exam_results_csv.template(db, user, exam_id, section_id)
+    """Excel sheet to fill in (class teacher / managers). `format=json` →
+    {filename, mime, content_base64} for the mobile app."""
     if format == "json":
-        return {"filename": filename, "content": content}
-    return Response(content.encode("utf-8"), media_type="text/csv; charset=utf-8",
+        return exam_results_import.template_base64(db, user, exam_id, section_id)
+    filename, content = exam_results_import.template(db, user, exam_id, section_id)
+    return Response(content, media_type=spreadsheet.XLSX_MIME,
                     headers={"Content-Disposition": content_disposition(filename, inline=False)})
 
 
 @router.post("/{exam_id}/results/import")
-def import_results(exam_id: int, section_id: int = Form(...), file: UploadFile = File(..., description="The CSV"),
+def import_results(exam_id: int, section_id: int = Form(...),
+                   max_marks: float = Form(..., gt=0, lt=MARKS_LIMIT,
+                                           description="What every subject in this upload is out of, e.g. 50"),
+                   file: UploadFile = File(..., description="The filled-in Excel (.xlsx) template"),
                    user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
-    """Upload the whole section's marks from the CSV template (class teacher / managers). All or nothing."""
-    return exam_results_csv.import_csv(db, user, exam_id, section_id, file)
+    """Upload the whole section's marks from the Excel template (class teacher / managers).
+    All or nothing; publishes the exam's results."""
+    return exam_results_import.import_results(db, user, exam_id, section_id, file, max_marks)
 
 
 @router.put("/{exam_id}/results")

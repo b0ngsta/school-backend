@@ -8,6 +8,7 @@ import zipfile
 
 import pytest
 from helpers import bearer, jpeg_with_gps, login, png_bytes
+from openpyxl import Workbook, load_workbook
 from PIL import Image
 
 from app.core.config import settings
@@ -18,6 +19,23 @@ from app.services.user_import import writer as import_writer
 
 STUDENT_HEADER = ["username", "password", "full_name", "email", "phone", "admission_no", "roll_no", "dob",
                   "father_name", "guardian_phone", "photo"]
+
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def xlsx_rows(content: bytes) -> list[list]:
+    ws = load_workbook(io.BytesIO(content)).worksheets[0]
+    return [list(r) for r in ws.iter_rows(values_only=True) if any(v is not None for v in r)]
+
+
+def xlsx_bytes(rows: list[list]) -> bytes:
+    wb = Workbook()
+    for r in rows:
+        wb.active.append(r)
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
 def make_csv(rows: list[list[str]], header: list[str] = STUDENT_HEADER, delimiter: str = ",",
@@ -72,10 +90,12 @@ def test_columns_and_template(client, school):
     assert {c["name"] for c in spec["columns"] if c["required"]} == {"username", "password", "full_name", "email"}
 
     t = client.get("/imports/users/template", params={"user_type": "teacher"}, headers=bearer(school.admin))
-    assert t.headers["content-type"].startswith("text/csv")
-    assert "attachment" in t.headers["content-disposition"]
-    assert t.content.decode("utf-8-sig").strip() == ("username,password,full_name,email,phone,subject,"
-                                                     "qualification,joining_date,address,photo")
+    # Nov 2026: an Excel workbook (was CSV) with a "How to fill" sheet
+    assert t.headers["content-type"] == XLSX
+    assert "attachment" in t.headers["content-disposition"] and ".xlsx" in t.headers["content-disposition"]
+    assert xlsx_rows(t.content) == [["username", "password", "full_name", "email", "phone", "subject",
+                                     "qualification", "joining_date", "address", "photo"]]
+    assert load_workbook(io.BytesIO(t.content)).sheetnames == ["Users", "How to fill"]
 
 
 def test_preview_then_save_students(client, school, db):
@@ -121,7 +141,8 @@ def test_reupload_updates_only_what_changed(client, school, db):
     exported = client.get("/imports/users/export", params={"user_type": "student", "class_id": school.c1,
                                                            "section_id": school.c1a}, headers=bearer(school.admin))
     assert exported.status_code == 200
-    table = list(csv.DictReader(io.StringIO(exported.content.decode("utf-8-sig"))))
+    head, *body = xlsx_rows(exported.content)
+    table = [{k: ("" if v is None else str(v)) for k, v in zip(head, row, strict=False)} for row in body]
     assert [r["username"] for r in table] == ["student1", "student2", "kid10", "kid11"]
     assert all(r["password"] == "" and r["photo"] == "" for r in table)
 
@@ -423,7 +444,13 @@ def test_failed_save_removes_stored_photos(client, school, db, monkeypatch):
 def test_file_level_problems(client, school, monkeypatch):
     sec = (school.c1, school.c1a)
     xlsx = upload(client, school.admin, "student", b"PK\x03\x04 excel stuff", section=sec)
-    assert xlsx.status_code == 400 and "Excel" in xlsx.json()["detail"]
+    assert xlsx.status_code == 400 and "Excel" in xlsx.json()["detail"]  # a broken workbook
+    xls = upload(client, school.admin, "student", b"\xd0\xcf\x11\xe0 old excel", section=sec)
+    assert xls.status_code == 400 and ".xlsx" in xls.json()["detail"]
+    # a real workbook works like the CSV
+    good = upload(client, school.admin, "student", xlsx_bytes(list(csv.reader(io.StringIO(
+        make_csv([kid(93), kid(94)]).decode("utf-8-sig"))))), section=sec)
+    assert good.status_code == 200 and good.json()["summary"]["create"] == 2
     latin1 = upload(client, school.admin, "student", "username,full_name,email\nkid,Ren\xe9,a@b.co\n".encode("latin-1"),
                     section=sec)
     assert latin1.status_code == 400 and "UTF-8" in latin1.json()["detail"]
@@ -451,8 +478,10 @@ def test_export_protects_against_spreadsheet_formulas(client, school):
                       headers=a).status_code == 200
     exported = client.get("/imports/users/export", params={"user_type": "student", "class_id": school.c1,
                                                            "section_id": school.c1a}, headers=a)
-    text = exported.content.decode("utf-8-sig")
-    assert "'=HYPERLINK" in text and "'+91 70000 00001" in text
+    # stored as text cells, never as formulas
+    ws = load_workbook(io.BytesIO(exported.content)).worksheets[0]
+    cells = {c.value: c.data_type for row in ws.iter_rows() for c in row if c.value}
+    assert cells['=HYPERLINK("http://evil")'] == "s" and cells["+91 70000 00001"] == "s"
     # uploading the export again changes nothing (the apostrophes are removed)
     report = upload(client, school.admin, "student", exported.content, section=(school.c1, school.c1a)).json()
     assert rows_by_user(report)["student1"]["action"] == "unchanged"

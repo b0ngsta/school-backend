@@ -1,34 +1,33 @@
 """Exam results for a whole section at once: a marks sheet (students × subjects),
-a CSV template to fill in, and the CSV upload (Nov 2026).
+an Excel template to fill in, and the Excel upload (Nov 2026; CSV still read
+for old clients).
 
 Who:
 * the sheet (read): managers + teachers assigned to the section (as GET /exams/{id}/results);
 * template + upload: managers or the section's CLASS teacher.
 
-CSV format (UTF-8, Excel's "CSV UTF-8" is fine):
+Template (.xlsx, sheet "Marks" + a "How to fill" sheet):
 
-    student_id,admission_no,roll_no,student_name,English,Mathematics,…,remarks
-    MAX,,,Maximum marks,100,100,…,
-    12,ADM001,1,Asha Verma,78,AB,…,Good work
+    student_id | admission_no | roll_no | student_name | English | Mathematics | … | remarks
 
 * one column per subject of the class (names as in the class's subject list,
-  any letter case); `student_name` is only for the teacher's eyes; `remarks`
-  is optional (the remark for the whole exam);
-* the optional `MAX` row sets each subject's maximum (else the maximum saved
-  earlier for that subject, else the exam's maximum);
+  any letter case); the first four columns identify the student (grey, don't
+  edit); `remarks` is optional (the remark for the whole exam);
+* the MAXIMUM marks are NOT in the sheet: the teacher types them in the upload
+  form (`max_marks`, required — "out of" for every subject of this upload);
 * a student is found by `student_id`, else `admission_no`, else `roll_no` —
   only students of that section;
 * a cell: a number from 0 to the maximum, `AB` = absent, empty = leave as it is.
 
 The upload is all-or-nothing: any bad cell → 400 with `errors: [{row, column,
 message}]` and nothing is saved. Marks land in exam_results exactly as if
-typed in the web app per subject (`subject` = the class's subject name), so
-every screen that shows results sees them.
+typed in the web app per subject. A successful upload PUBLISHES the exam's
+results (parents see them at once in Exams and the Performance Report) and
+gives the exam a maximum if it had none.
 """
 from __future__ import annotations
 
-import csv
-import io
+import base64
 import re
 
 from fastapi import UploadFile
@@ -38,10 +37,10 @@ from app.core.roles import MANAGERS
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.exams import MARKS_LIMIT
-from app.services import access, audit
+from app.services import access, audit, spreadsheet
 from app.services import exams as exam_service
 
-MAX_BYTES = 1024 * 1024
+MAX_BYTES = 2 * 1024 * 1024
 ABSENT = "AB"
 _ABSENT_WORDS = {"ab", "abs", "absent"}
 ID_COLUMNS = ("student_id", "admission_no", "roll_no", "student_name")
@@ -50,12 +49,6 @@ REMARKS = "remarks"
 
 def _num(value) -> float | None:
     return float(value) if value is not None else None
-
-
-def _show(value: float | None) -> str:
-    if value is None:
-        return ""
-    return f"{value:g}"
 
 
 def _context(db: Db, user: CurrentUser, exam_id: int, section_id: int) -> tuple[dict, dict, list[str]]:
@@ -158,55 +151,70 @@ def _slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", text or "").strip("-").lower() or "results"
 
 
-def template(db: Db, user: CurrentUser, exam_id: int, section_id: int) -> tuple[str, str]:
-    """(file name, CSV text) — the section's students, the subjects as columns,
-    a MAX row and any marks already saved, so a re-upload changes nothing."""
+def template(db: Db, user: CurrentUser, exam_id: int, section_id: int) -> tuple[str, bytes]:
+    """(file name, .xlsx bytes) — the section's students, the subjects as
+    columns and any marks already saved, so a re-upload changes nothing."""
     data = sheet(db, user, exam_id, section_id)
     if not data["can_import"]:
         raise Forbidden("Only the class teacher of this section (or admins) can upload results")
     subjects = [s["name"] for s in data["subjects"]]
     if not subjects:
         raise BadRequest("This class has no subjects yet — add them (Classes → Subjects) before uploading marks")
-    out = io.StringIO()
-    w = csv.writer(out, lineterminator="\r\n")
-    w.writerow([*ID_COLUMNS, *subjects, REMARKS])
-    w.writerow(["MAX", "", "", "Maximum marks", *(_show(s["max_marks"]) for s in data["subjects"]), ""])
+    marks_rule = 'OR(AND(ISNUMBER({cell}),{cell}>=0),UPPER(TRIM({cell}))="AB")'
+    columns = [
+        spreadsheet.Column("student_id", 11, locked_look=True, note="Don't change — identifies the student"),
+        spreadsheet.Column("admission_no", 14, text=True, locked_look=True),
+        spreadsheet.Column("roll_no", 9, text=True, locked_look=True),
+        spreadsheet.Column("student_name", 26, locked_look=True),
+        *(spreadsheet.Column(s, max(12, min(24, len(s) + 4)), validation=marks_rule,
+                             validation_error="Type the marks (a number) or AB for absent.") for s in subjects),
+        spreadsheet.Column(REMARKS, 30),
+    ]
+    rows = []
     for st in data["students"]:
         cells = [st["marks"].get(s) for s in subjects]
-        w.writerow([st["student_id"], st["admission_no"] or "", st["roll_no"] or "", st["full_name"],
-                    *(c if c == ABSENT else _show(c) for c in cells), st["remarks"] or ""])
+        rows.append([st["student_id"], st["admission_no"] or "", st["roll_no"] or "", st["full_name"],
+                     *cells, st["remarks"] or ""])
     sec = data["section"]
+    title = f"{data['exam']['name']} · {sec.get('class_name', '')} {sec.get('section_name', '')}".strip()
+    content = spreadsheet.workbook(spreadsheet.Sheet(
+        title="Marks", columns=columns, rows=rows,
+        help=[
+            f"How to fill the marks sheet — {title}",
+            "1. Fill in the marks of every student under each subject column on the 'Marks' sheet.",
+            "2. Type AB for a student who was absent. Leave a cell empty to keep the mark already saved.",
+            "3. Do not change the grey columns (student_id, admission_no, roll_no, student_name) "
+            "or the subject names in the first row.",
+            "4. The remarks column is optional (one remark per student for the whole exam).",
+            "5. The maximum marks are NOT typed here: you enter them (e.g. 50 or 100) when you upload the file.",
+            "6. Save the file as Excel (.xlsx) and upload it on the exam's Results page. "
+            "If any cell is wrong, nothing is saved and the rows to fix are listed.",
+        ],
+    ))
     parts = (data["exam"]["name"], sec.get("class_name", ""), sec.get("section_name", ""))
-    name = "results-" + "-".join(_slug(p) for p in parts) + ".csv"
-    return name, "\ufeff" + out.getvalue()  # BOM: Excel opens UTF-8 names correctly
+    return "results-" + "-".join(_slug(p) for p in parts) + ".xlsx", content
 
 
-def _decode(raw: bytes) -> str:
-    for enc in ("utf-8-sig", "cp1252", "latin-1"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    raise BadRequest("Could not read the file — save it as CSV (UTF-8)")
+def template_base64(db: Db, user: CurrentUser, exam_id: int, section_id: int) -> dict:
+    """For the mobile app (it saves the file itself): {filename, mime, content_base64}."""
+    name, content = template(db, user, exam_id, section_id)
+    return {"filename": name, "mime": spreadsheet.XLSX_MIME, "content_base64": base64.b64encode(content).decode()}
 
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip()).lower()
 
 
-def import_csv(db: Db, user: CurrentUser, exam_id: int, section_id: int, file: UploadFile) -> dict:
+def import_results(db: Db, user: CurrentUser, exam_id: int, section_id: int, file: UploadFile,
+                   max_marks: float) -> dict:
+    """Save the marks in the uploaded Excel sheet; `max_marks` = what every
+    subject of this upload is out of (asked in the upload form, required)."""
+    if max_marks is None or not 0 < max_marks < MARKS_LIMIT:
+        raise BadRequest("Enter the maximum marks (out of) for this exam, e.g. 50 or 100")
     raw = file.file.read(MAX_BYTES + 1)
     if len(raw) > MAX_BYTES:
-        raise BadRequest("The CSV is larger than 1 MB")
-    text = _decode(raw)
-    if not text.strip():
-        raise BadRequest("The CSV is empty")
-    try:
-        sample = text[:4096]
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-    except csv.Error:
-        dialect = csv.excel
-    rows = list(csv.reader(io.StringIO(text), dialect))
+        raise BadRequest("The file is larger than 2 MB")
+    rows = spreadsheet.read_rows(raw, what="marks file")
 
     with db.transaction():
         exam, section, subjects = _context(db, user, exam_id, section_id)
@@ -246,8 +254,7 @@ def import_csv(db: Db, user: CurrentUser, exam_id: int, section_id: int, file: U
         by_id = {str(s["student_id"]): s for s in students}
         by_adm = {_norm(s["admission_no"]): s for s in students if s["admission_no"]}
         by_roll = {_norm(str(s["roll_no"])): s for s in students if s["roll_no"] not in (None, "")}
-        saved = _saved(db, exam_id, [s["student_id"] for s in students])
-        maxima = _subject_max(saved, subjects, exam)
+        maxima = {s: float(max_marks) for s in subjects}
 
         def cell(row: list[str], i: int | None) -> str:
             return row[i].strip() if i is not None and i < len(row) else ""
@@ -259,18 +266,7 @@ def import_csv(db: Db, user: CurrentUser, exam_id: int, section_id: int, file: U
                 continue
             if any(cell(row, col_id.get(k)).upper() == "MAX" for k in ("student_id", "admission_no", "roll_no")) \
                     or cell(row, first_col).upper() == "MAX":
-                for i, sub in col_subject.items():
-                    v = cell(row, i)
-                    if not v:
-                        continue
-                    try:
-                        top = float(v)
-                        if not 0 < top < MARKS_LIMIT:
-                            raise ValueError
-                        maxima[sub] = top
-                    except ValueError:
-                        errors.append({"row": n, "column": sub, "message": f"Maximum '{v}' is not a number above 0"})
-                continue
+                continue  # the MAX row of the old CSV template: the maximum now comes from the form
             data_rows.append((n, row))
 
         entries: list[tuple] = []
@@ -320,7 +316,7 @@ def import_csv(db: Db, user: CurrentUser, exam_id: int, section_id: int, file: U
         if errors:
             _fail(errors)
         if not entries and not remarks:
-            raise BadRequest("The CSV has no marks to save")
+            raise BadRequest("The file has no marks to save")
 
         if entries:
             db.execute_many(
@@ -337,16 +333,23 @@ def import_csv(db: Db, user: CurrentUser, exam_id: int, section_id: int, file: U
                 "ON DUPLICATE KEY UPDATE remarks = VALUES(remarks)",
                 remarks,
             )
+        # uploaded results are for parents to see: publish them (managers can still unpublish),
+        # and remember the maximum on the exam when it had none (the default for typed marks)
+        published_now = not exam["results_published"]
+        db.execute("UPDATE exams SET results_published = 1, max_marks = COALESCE(max_marks, %s) WHERE id = %s",
+                   (max_marks, exam_id))
         audit.record(db, user, "exam_results.import", "exam", exam_id,
                      {"section_id": section_id, "students": len(seen), "marks": len(entries),
-                      "absent": absent_n, "subjects": sorted(set(col_subject.values()))})
+                      "absent": absent_n, "max_marks": max_marks, "published": published_now,
+                      "subjects": sorted(set(col_subject.values()))})
     return {"saved": True, "students": len(seen), "marks": len(entries), "absent": absent_n,
-            "remarks": len(remarks), "subjects": [s for s in subjects if s in col_subject.values()]}
+            "remarks": len(remarks), "max_marks": float(max_marks), "published": True,
+            "subjects": [s for s in subjects if s in col_subject.values()]}
 
 
 def _fail(errors: list[dict]) -> None:
     first = errors[0]
     where = f"row {first['row']}" + (f", {first['column']}" if first.get("column") else "")
     more = f" (and {len(errors) - 1} more)" if len(errors) > 1 else ""
-    raise BadRequest(f"Nothing was saved — fix the CSV: {where}: {first['message']}{more}",
-                     extra={"code": "csv_invalid", "errors": errors[:200]})
+    raise BadRequest(f"Nothing was saved — fix the file: {where}: {first['message']}{more}",
+                     extra={"code": "file_invalid", "errors": errors[:200]})

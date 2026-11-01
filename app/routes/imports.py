@@ -1,4 +1,4 @@
-"""Bulk user import: CSV template, column help, export and upload."""
+"""Bulk user import: Excel template, column help, export and upload (.xlsx, CSV still accepted)."""
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import Response
 
@@ -7,7 +7,7 @@ from app.db import Db
 from app.dependencies import get_db, require_roles
 from app.models.auth import CurrentUser
 from app.models.common import UserType
-from app.services import user_import
+from app.services import spreadsheet, user_import
 from app.storage.base import content_disposition
 
 router = APIRouter(prefix="/imports", tags=["bulk import"])
@@ -15,8 +15,8 @@ router = APIRouter(prefix="/imports", tags=["bulk import"])
 staff = require_roles(*STAFF)
 
 
-def _csv(data: bytes, filename: str) -> Response:
-    return Response(data, media_type="text/csv; charset=utf-8",
+def _xlsx(data: bytes, filename: str) -> Response:
+    return Response(data, media_type=spreadsheet.XLSX_MIME,
                     headers={"Content-Disposition": content_disposition(filename, inline=False)})
 
 
@@ -28,8 +28,8 @@ def import_columns(user_type: UserType, actor: CurrentUser = Depends(staff)):
 
 @router.get("/users/template")
 def import_template(user_type: UserType, actor: CurrentUser = Depends(staff)):
-    """An empty CSV with the right headers."""
-    return _csv(*user_import.template(actor, user_type))
+    """An empty Excel sheet with the right headers (+ a "How to fill" sheet)."""
+    return _xlsx(*user_import.template(actor, user_type))
 
 
 @router.get("/users/export")
@@ -41,7 +41,7 @@ def export_users(
     db: Db = Depends(get_db),
 ):
     """Current users in the import format, to edit and upload again."""
-    return _csv(*user_import.export(db, actor, user_type, class_id, section_id))
+    return _xlsx(*user_import.export(db, actor, user_type, class_id, section_id))
 
 
 @router.post("/users")
@@ -50,7 +50,7 @@ def import_users(
     class_id: int | None = Form(None),
     section_id: int | None = Form(None),
     dry_run: bool = Form(True, description="true (default): only report what would happen"),
-    file: UploadFile = File(..., description="The CSV file"),
+    file: UploadFile = File(..., description="The Excel (.xlsx) file (CSV also accepted)"),
     photos: UploadFile | None = File(None, description="Optional ZIP of profile photos"),
     actor: CurrentUser = Depends(staff),
     db: Db = Depends(get_db),

@@ -379,7 +379,7 @@ def test_ids_from_another_school_are_not_found(client, schools):
         c.get(f"/exams/{b.exam}/results/sheet?section_id={a.sec}", headers=h),
         c.get(f"/exams/{a.exam}/results/sheet?section_id={b.sec}", headers=h),
         c.get(f"/exams/{a.exam}/results/template?section_id={a.sec}", headers=h),
-        c.post(f"/exams/{a.exam}/results/import", headers=h, data={"section_id": a.sec},
+        c.post(f"/exams/{a.exam}/results/import", headers=h, data={"section_id": a.sec, "max_marks": 50},
                files={"file": ("r.csv", b"roll_no,x\n1,1\n", "text/csv")}),
         c.put(f"/students/{a.student}/remarks/1", headers=h, json={"remark": "x"}),
         c.get(f"/attendance?section_id={a.sec}&day={school_today()}", headers=h),

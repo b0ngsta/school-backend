@@ -2,13 +2,15 @@
 upload by the class teacher) and the parent app's performance report."""
 from __future__ import annotations
 
-import csv
+import base64
 import io
 
 import pytest
 from helpers import PDF_BYTES, bearer, login
+from openpyxl import Workbook, load_workbook
 
 from app.services import performance
+from app.services.spreadsheet import XLSX_MIME as XLSX
 
 
 def _ok(r, code=200):
@@ -28,10 +30,18 @@ def _exam(client, a, name, start, class_id=None, max_marks=100):
     return _ok(client.post("/exams", headers=a, json=body), 201)["id"]
 
 
-def _csv(rows):
-    out = io.StringIO()
-    csv.writer(out).writerows(rows)
-    return {"file": ("results.csv", out.getvalue().encode(), "text/csv")}
+def _xlsx(rows):
+    wb = Workbook()
+    for r in rows:
+        wb.active.append(r)
+    out = io.BytesIO()
+    wb.save(out)
+    return {"file": ("results.xlsx", out.getvalue(), XLSX)}
+
+
+def _read_xlsx(content):
+    ws = load_workbook(io.BytesIO(content)).worksheets[0]
+    return [[c for c in row] for row in ws.iter_rows(values_only=True)]
 
 
 # ------------------------------------------------------------ full syllabus
@@ -86,75 +96,94 @@ def test_remark_edit_and_delete(client, school):
 
 # ------------------------------------------------------------ results CSV
 
-def test_results_csv_template_and_upload(client, school):
+def test_results_excel_template_and_upload(client, school, s1):
     a, t1, t2 = bearer(school.admin), bearer(school.t1), bearer(school.t2)
     _ok(client.put(f"/classes/{school.c1}/subjects", headers=a, json={"subjects": ["English", "Math"]}))
-    exam = _exam(client, a, "Term 1", "2026-09-01", school.c1)
+    exam = _exam(client, a, "Term 1", "2026-09-01", school.c1, max_marks=None)
+    url = f"/exams/{exam}/results"
 
     # only the class teacher (t1) or managers
-    assert _ok(client.get(f"/exams/{exam}/results/template?section_id={school.c1a}", headers=t2), 403)
-    assert _ok(client.post(f"/exams/{exam}/results/import", headers=t2, data={"section_id": school.c1a},
-                           files=_csv([["roll_no", "Math"], ["1", "50"]])), 403)
-    assert _ok(client.get(f"/exams/{exam}/results/sheet?section_id={school.c1a}", headers=t2))["can_import"] is False
+    assert _ok(client.get(f"{url}/template?section_id={school.c1a}", headers=t2), 403)
+    assert _ok(client.post(f"{url}/import", headers=t2, data={"section_id": school.c1a, "max_marks": 50},
+                           files=_xlsx([["roll_no", "Math"], [1, 50]])), 403)
+    assert _ok(client.get(f"{url}/sheet?section_id={school.c1a}", headers=t2))["can_import"] is False
 
-    r = client.get(f"/exams/{exam}/results/template?section_id={school.c1a}", headers=t1)
-    assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
-    assert "attachment" in r.headers["content-disposition"]
-    rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    r = client.get(f"{url}/template?section_id={school.c1a}", headers=t1)
+    assert r.status_code == 200 and r.headers["content-type"] == XLSX
+    assert "attachment" in r.headers["content-disposition"] and ".xlsx" in r.headers["content-disposition"]
+    rows = _read_xlsx(r.content)
     assert rows[0] == ["student_id", "admission_no", "roll_no", "student_name", "English", "Math", "remarks"]
-    assert rows[1][:6] == ["MAX", "", "", "Maximum marks", "100", "100"]
-    assert [row[2] for row in rows[2:]] == ["1", "2"]  # only section A
-    as_json = _ok(client.get(f"/exams/{exam}/results/template?section_id={school.c1a}&format=json", headers=t1))
-    assert as_json["filename"].endswith(".csv") and as_json["content"].lstrip("﻿").startswith("student_id")
+    assert [row[2] for row in rows[1:]] == ["1", "2"]  # only section A, no MAX row any more
+    assert load_workbook(io.BytesIO(r.content)).sheetnames == ["Marks", "How to fill"]
+    as_json = _ok(client.get(f"{url}/template?section_id={school.c1a}&format=json", headers=t1))
+    assert as_json["filename"].endswith(".xlsx") and as_json["mime"] == XLSX
+    assert base64.b64decode(as_json["content_base64"])[:2] == b"PK"
 
-    # fill it in: maximum 80 for English, a student absent in Math, a remark
-    rows[1][4] = "80"
-    rows[2][4:7] = ["72", "91", "Well done"]
-    rows[3][4:7] = ["60.5", "AB", ""]
-    done = _ok(client.post(f"/exams/{exam}/results/import", headers=t1, data={"section_id": school.c1a},
-                           files=_csv(rows)))
-    assert (done["students"], done["marks"], done["absent"], done["remarks"]) == (2, 4, 1, 1)
+    # the maximum is required and comes from the form, not the sheet
+    rows[1][4:7] = [36, 45.5, "Well done"]
+    rows[2][4:7] = [30.5, "AB", None]
+    assert _ok(client.post(f"{url}/import", headers=t1, data={"section_id": school.c1a},
+                           files=_xlsx(rows)), 422)
+    assert _ok(client.post(f"{url}/import", headers=t1, data={"section_id": school.c1a, "max_marks": 0},
+                           files=_xlsx(rows)), 422)
+    # nothing published yet → nothing in the parent's performance report
+    assert _ok(client.get("/student/performance", headers=s1))["overall"] is None
+    done = _ok(client.post(f"{url}/import", headers=t1, data={"section_id": school.c1a, "max_marks": 50},
+                           files=_xlsx(rows)))
+    assert (done["students"], done["marks"], done["absent"], done["remarks"], done["published"]) == (2, 4, 1, 1, True)
 
-    sheet = _ok(client.get(f"/exams/{exam}/results/sheet?section_id={school.c1a}", headers=t1))
-    assert sheet["can_import"] is True
-    assert [s["max_marks"] for s in sheet["subjects"]] == [80.0, 100.0]
+    sheet = _ok(client.get(f"{url}/sheet?section_id={school.c1a}", headers=t1))
+    assert sheet["exam"]["results_published"] and sheet["exam"]["max_marks"] == 50.0  # exam had no maximum
+    assert [s["max_marks"] for s in sheet["subjects"]] == [50.0, 50.0]
     first, second = sheet["students"]
-    assert first["marks"] == {"English": 72.0, "Math": 91.0} and first["remarks"] == "Well done"
-    assert (first["total"], first["max_total"], first["percentage"]) == (163.0, 180.0, 90.6)
-    assert second["marks"] == {"English": 60.5, "Math": "AB"}
-    # the per-subject results screen sees them too
-    eng = _ok(client.get(f"/exams/{exam}/results?section_id={school.c1a}&subject=English", headers=t1))
-    assert [row["marks"] for row in eng["rows"]] == [72.0, 60.5] and eng["max_marks"] == 80.0
+    assert first["marks"] == {"English": 36.0, "Math": 45.5} and first["remarks"] == "Well done"
+    assert (first["total"], first["max_total"], first["percentage"]) == (81.5, 100.0, 81.5)
+    assert second["marks"] == {"English": 30.5, "Math": "AB"}
+    eng = _ok(client.get(f"{url}?section_id={school.c1a}&subject=English", headers=t1))
+    assert [row["marks"] for row in eng["rows"]] == [36.0, 30.5] and eng["max_marks"] == 50.0
+
+    # ...and it shows straight away in the parent's Exams screen and Performance Report
+    mine = next(e for e in _ok(client.get("/student/exams", headers=s1)) if e["id"] == exam)
+    assert mine["results_published"] and mine["total"] == 81.5 and mine["max_total"] == 100.0
+    rep = _ok(client.get("/student/performance", headers=s1))
+    assert [e["name"] for e in rep["exams"]] == ["Term 1"] and rep["overall"]["percentage"] == 81.5
 
     # a re-download carries the saved marks; uploading it again changes nothing
-    again = client.get(f"/exams/{exam}/results/template?section_id={school.c1a}", headers=a).content
-    rows2 = list(csv.reader(io.StringIO(again.decode("utf-8-sig"))))
-    assert rows2[1][4] == "80" and rows2[3][5] == "AB" and rows2[2][6] == "Well done"
-    _ok(client.post(f"/exams/{exam}/results/import", headers=a, data={"section_id": school.c1a},
-                    files={"file": ("r.csv", again, "text/csv")}))
-    assert _ok(client.get(f"/exams/{exam}/results/sheet?section_id={school.c1a}", headers=t1))["students"] \
-        == sheet["students"]
+    again = client.get(f"{url}/template?section_id={school.c1a}", headers=a).content
+    rows2 = _read_xlsx(again)
+    assert rows2[2][5] == "AB" and rows2[1][6] == "Well done" and rows2[1][4] == 36
+    _ok(client.post(f"{url}/import", headers=a, data={"section_id": school.c1a, "max_marks": 50},
+                    files={"file": ("r.xlsx", again, XLSX)}))
+    assert _ok(client.get(f"{url}/sheet?section_id={school.c1a}", headers=t1))["students"] == sheet["students"]
 
-    # all-or-nothing errors, with row numbers
-    bad = client.post(f"/exams/{exam}/results/import", headers=t1, data={"section_id": school.c1a},
-                      files=_csv([["roll_no", "English", "Science"], ["1", "10", "5"]]))
-    assert bad.status_code == 400 and bad.json()["code"] == "csv_invalid"
+    # all-or-nothing errors, with row numbers (marks above the maximum too)
+    bad = client.post(f"{url}/import", headers=t1, data={"section_id": school.c1a, "max_marks": 50},
+                      files=_xlsx([["roll_no", "English", "Science"], [1, 10, 5]]))
+    assert bad.status_code == 400 and bad.json()["code"] == "file_invalid"
     assert bad.json()["errors"][0]["column"] == "Science"
-    bad = client.post(f"/exams/{exam}/results/import", headers=t1, data={"section_id": school.c1a},
-                      files=_csv([["roll_no", "English", "Math"], ["1", "99", "50"], ["3", "1", "1"],
-                                  ["2", "abc", ""], ["1", "1", "1"]]))
+    bad = client.post(f"{url}/import", headers=t1, data={"section_id": school.c1a, "max_marks": 50},
+                      files=_xlsx([["roll_no", "English", "Math"], [1, 51, 50], [3, 1, 1],
+                                   [2, "abc", None], [1, 1, 1]]))
     errs = bad.json()["errors"]
     assert bad.status_code == 400 and [(e["row"], e["column"]) for e in errs] == \
         [(2, "English"), (3, ""), (4, "English"), (5, "")]
-    assert _ok(client.get(f"/exams/{exam}/results/sheet?section_id={school.c1a}", headers=t1))["students"][0][
-        "marks"]["English"] == 72.0  # nothing changed
-    # semicolons (Excel in some locales) and admission numbers work; blanks are left alone
-    _ok(client.post(f"/exams/{exam}/results/import", headers=t1, data={"section_id": school.c1a},
-                    files={"file": ("r.csv", b"admission_no;math\nADM2;77\nADM1;\n", "text/csv")}))
-    st = _ok(client.get(f"/exams/{exam}/results/sheet?section_id={school.c1a}", headers=t1))["students"]
-    assert (st[0]["marks"]["Math"], st[1]["marks"]["Math"]) == (91.0, 77.0)
-    # another school's / class's section
-    assert _ok(client.get(f"/exams/{exam}/results/sheet?section_id={school.c2a}", headers=a), 404)
+    assert "between 0 and 50" in errs[0]["message"]
+    assert _ok(client.get(f"{url}/sheet?section_id={school.c1a}", headers=t1))["students"][0][
+        "marks"]["English"] == 36.0  # nothing changed
+    # not a spreadsheet / old .xls
+    junk = client.post(f"{url}/import", headers=t1, data={"section_id": school.c1a, "max_marks": 50},
+                       files={"file": ("r.xlsx", b"PK\x03\x04 broken", XLSX)})
+    assert junk.status_code == 400 and "Excel" in junk.json()["detail"]
+    old = client.post(f"{url}/import", headers=t1, data={"section_id": school.c1a, "max_marks": 50},
+                      files={"file": ("r.xls", b"\xd0\xcf\x11\xe0 old", "application/vnd.ms-excel")})
+    assert old.status_code == 400 and ".xlsx" in old.json()["detail"]
+    # a CSV (older app builds) still works; blanks are left alone
+    _ok(client.post(f"{url}/import", headers=t1, data={"section_id": school.c1a, "max_marks": 50},
+                    files={"file": ("r.csv", b"admission_no;math\nADM2;47\nADM1;\n", "text/csv")}))
+    st = _ok(client.get(f"{url}/sheet?section_id={school.c1a}", headers=t1))["students"]
+    assert (st[0]["marks"]["Math"], st[1]["marks"]["Math"]) == (45.5, 47.0)
+    # another class's section
+    assert _ok(client.get(f"{url}/sheet?section_id={school.c2a}", headers=a), 404)
 
 
 # ------------------------------------------------------------ performance report

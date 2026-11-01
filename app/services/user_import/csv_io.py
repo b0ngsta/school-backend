@@ -1,4 +1,7 @@
-"""Reading uploaded CSV files and writing CSV downloads.
+"""Reading uploaded files and writing the template / export downloads.
+
+Nov 2026: templates and exports are Excel workbooks (.xlsx, `services/spreadsheet.py`)
+and uploads may be .xlsx (preferred) or CSV (older habits / scripts keep working).
 
 Reading is forgiving about what spreadsheet programs produce (UTF-8 with or
 without BOM, comma/semicolon/tab separators, blank trailing rows, header
@@ -6,9 +9,9 @@ spelling) and strict about everything else: a file that is not text, has
 missing columns or too many rows is rejected with a message that says how
 to fix it.
 
-Downloads are written as UTF-8 with BOM (so Excel shows Hindi/Tamil names
-correctly) and with spreadsheet-formula protection: a value starting with
-= + - @ is prefixed with an apostrophe, which reading removes again.
+Downloads are .xlsx with every value stored as a text/number cell, never a
+formula. CSV exports from before Nov 2026 prefixed = + - @ with an apostrophe;
+reading still removes it.
 """
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ from dataclasses import dataclass, field
 from fastapi import UploadFile
 
 from app.core.errors import BadRequest, PayloadTooLarge
+from app.services import spreadsheet
 from app.services.user_import.columns import Column, header_key, resolve_headers
 
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
@@ -46,11 +50,16 @@ def read_upload(upload: UploadFile, max_mb: int) -> bytes:
     while chunk := upload.file.read(_CHUNK):
         buffer.write(chunk)
         if buffer.tell() > limit:
-            raise PayloadTooLarge(f"The CSV file is larger than {max_mb} MB. Split it into smaller files.")
+            raise PayloadTooLarge(f"The file is larger than {max_mb} MB. Split it into smaller files.")
     return buffer.getvalue()
 
 
 def parse(data: bytes, user_type: str, max_rows: int) -> ParsedCsv:
+    if spreadsheet.is_xlsx(data):
+        records = spreadsheet.read_rows(data, what="Excel file")
+        if not any(any(c.strip() for c in rec) for rec in records):
+            raise BadRequest("The file is empty. Download the template and fill in one user per row.")
+        return _parse_records(records, user_type, max_rows)
     text = _decode(data)
     lines = text.splitlines()
     first_line = next((line for line in lines if line.strip()), "")
@@ -64,6 +73,10 @@ def parse(data: bytes, user_type: str, max_rows: int) -> ParsedCsv:
         raise BadRequest(f"The CSV file could not be read near line {reader.line_num}: {exc}. "
                          "Save it again from your spreadsheet as 'CSV UTF-8'.") from exc
 
+    return _parse_records(records, user_type, max_rows)
+
+
+def _parse_records(records: list[list[str]], user_type: str, max_rows: int) -> ParsedCsv:
     header_index = next(i for i, rec in enumerate(records) if any(cell.strip() for cell in rec))
     columns, positions, warnings = _map_headers(records[header_index], user_type)
 
@@ -79,7 +92,7 @@ def parse(data: bytes, user_type: str, max_rows: int) -> ParsedCsv:
         if len(rows) > max_rows:
             raise BadRequest(f"The file has more than {max_rows} users. Split it into smaller files.")
     if not rows:
-        raise BadRequest("The CSV file has a header row but no users.")
+        raise BadRequest("The file has a header row but no users.")
     return ParsedCsv(columns=columns, rows=rows, warnings=warnings)
 
 
@@ -90,25 +103,25 @@ def unescape(cell: str) -> str:
     return value
 
 
-def write(headers: list[str], rows: list[list[object]]) -> bytes:
-    out = io.StringIO()
-    writer = csv.writer(out, lineterminator="\r\n")
-    writer.writerow(headers)
-    for row in rows:
-        writer.writerow(["" if v is None else _escape(str(v)) for v in row])
-    return ("﻿" + out.getvalue()).encode("utf-8")
+TEXT_COLUMNS = {"username", "password", "phone", "admission_no", "roll_no", "guardian_phone", "pincode"}
 
 
-def _escape(value: str) -> str:
-    return "'" + value if value.startswith(FORMULA_PREFIXES) else value
+def write_xlsx(headers: list[str], rows: list[list[object]], help_lines: list[str] | None = None) -> bytes:
+    """The template / export as an Excel workbook (text cells never become formulas)."""
+    columns = [spreadsheet.Column(h, max(12, min(30, len(h) + 6)), text=h in TEXT_COLUMNS) for h in headers]
+    return spreadsheet.workbook(spreadsheet.Sheet(
+        title="Users", columns=columns,
+        rows=[["" if v is None else (str(v) if not isinstance(v, (int, float)) else v) for v in row] for row in rows],
+        help=help_lines or [], blank_rows=200 if not rows else 50,
+    ))
 
 
 def _decode(data: bytes) -> str:
-    if data.startswith(b"PK\x03\x04"):
-        raise BadRequest("This is an Excel (.xlsx) file, not a CSV. In Excel choose File → Save As → "
-                         "'CSV UTF-8 (Comma delimited)'.")
+    if data.startswith(b"\xd0\xcf\x11\xe0"):
+        raise BadRequest("This is an old Excel 97-2003 (.xls) file. In Excel choose File → Save As → "
+                         "'Excel Workbook (.xlsx)' and upload that.")
     if b"\x00" in data[:4096]:
-        raise BadRequest("This is not a text CSV file. Save it from your spreadsheet as 'CSV UTF-8'.")
+        raise BadRequest("This is not an Excel (.xlsx) or CSV file. Download the template and fill that in.")
     try:
         return data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
