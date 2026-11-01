@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query, Response
 from app.db import Db
 from app.dependencies import get_db, page_params, paged, require_roles
 from app.models.auth import CurrentUser
-from app.services import announcements, documents, messages, student_attendance, transport
+from app.services import announcements, documents, messages, performance, student_attendance, transport
 from app.services import student_portal as portal
 from app.services.pagination import Page
 
@@ -127,6 +127,19 @@ def my_documents(response: Response, kind: Literal["timetable", "syllabus"], pag
 def my_syllabus(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     """One entry per subject of the class, each with its syllabus files."""
     return documents.syllabus_for_student(db, user.id)
+
+
+@router.get("/syllabus/full")
+def my_full_syllabus(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
+    """The class's full syllabus (all subjects in one file), newest first; [] = none shared."""
+    return documents.full_syllabus_for_student(db, user.id)
+
+
+@router.get("/performance")
+def my_performance(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
+    """Session-wide performance report (published exam results only), for the
+    app's Performance Report screen."""
+    return performance.report(db, user.id)
 
 
 @router.get("/messages")

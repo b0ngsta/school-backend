@@ -1,7 +1,8 @@
 """School documents: files the school shares with parents, by kind.
 
     timetable   exam date-sheets, a changed class timetable, …
-    syllabus    a subject's syllabus for a class
+    syllabus    a subject's syllabus for a class, or — with no subject — the
+                FULL syllabus of the class (every subject in one file; Nov 2026)
 
 A document is aimed at the whole school (no class), one class, or one
 section of a class; syllabus documents name a subject. The file is a PDF or
@@ -124,9 +125,7 @@ def create(db: Db, user: CurrentUser, kind: str, title: str, note: str | None, c
     title = _clean(title, 150)
     if not title:
         raise BadRequest("Title is required")
-    subject = _clean(subject, 100)
-    if kind == "syllabus" and not subject:
-        raise BadRequest("Subject is required for a syllabus")
+    subject = _clean(subject, 100)  # syllabus without a subject = the class's full syllabus
     with db.transaction():
         class_id, section_id = _target(db, class_id, section_id)
         _ensure_can_upload(db, user, kind, class_id, section_id)
@@ -152,9 +151,7 @@ def update(db: Db, user: CurrentUser, document_id: int, title: str | None, note:
         new_title = _clean(title, 150) if title is not None else doc["title"]
         if not new_title:
             raise BadRequest("Title is required")
-        new_subject = _clean(subject, 100) if subject is not None else doc["subject"]
-        if doc["kind"] == "syllabus" and not new_subject:
-            raise BadRequest("Subject is required for a syllabus")
+        new_subject = _clean(subject, 100) if subject is not None else doc["subject"]  # "" → full syllabus
         new_note = _clean(note, 4000) if note is not None else doc["note"]
         columns = (doc["attachment_path"], doc["attachment_name"], doc["attachment_type"])
         if file is not None:
@@ -208,10 +205,28 @@ def for_student(db: Db, student_id: int, kind: str, page: pagination.Page | None
                             ORDER, page)
 
 
+FULL = "(d.subject IS NULL OR d.subject = '')"
+
+
+def full_syllabus_for_student(db: Db, student_id: int) -> list[dict]:
+    """Full-syllabus files (a syllabus document without a subject) for the
+    student's class / section / whole school, newest first. The parent app
+    shows its "Full Syllabus" section only when this is not empty."""
+    scope, params = _student_scope(db, student_id)
+    return db.all(_SELECT + " AND d.kind = 'syllabus' AND " + FULL + " AND " + scope + " ORDER BY " + ORDER,
+                  (db.org, *params))
+
+
+def full_syllabus_count(db: Db, student_id: int) -> int:
+    scope, params = _student_scope(db, student_id)
+    return int(db.scalar("SELECT COUNT(*) FROM school_documents d WHERE d.org_id = %s AND d.kind = 'syllabus' AND "
+                         + FULL + " AND " + scope, (db.org, *params)) or 0)
+
+
 def syllabus_for_student(db: Db, student_id: int) -> list[dict]:
     """One entry per subject of the student's class (in the class's order),
-    each with its syllabus files; subjects named only on a document follow,
-    then files without a subject under "General"."""
+    each with its syllabus files; subjects named only on a document follow.
+    Full-syllabus files (no subject) are NOT here — see full_syllabus_for_student."""
     me = db.one("SELECT class_id FROM student_profiles WHERE user_id = %s AND org_id = %s",
                 (student_id, db.org)) or {}
     subjects = [r["name"] for r in db.all(
@@ -222,6 +237,8 @@ def syllabus_for_student(db: Db, student_id: int) -> list[dict]:
     for name in subjects:
         groups.setdefault(name.strip().lower(), {"subject": name, "documents": []})
     for doc in docs:
-        name = (doc["subject"] or "").strip() or "General"
+        name = (doc["subject"] or "").strip()
+        if not name:
+            continue  # full syllabus: its own section in the app
         groups.setdefault(name.lower(), {"subject": name, "documents": []})["documents"].append(doc)
     return list(groups.values())

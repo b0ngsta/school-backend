@@ -77,6 +77,10 @@ class RemarkCreate(BaseModel):
     remark: str = Field(min_length=1)
 
 
+class RemarkUpdate(BaseModel):
+    remark: str = Field(min_length=1)
+
+
 class ReportCardCreate(BaseModel):
     term: str
     grades: dict[str, Any] | None = None

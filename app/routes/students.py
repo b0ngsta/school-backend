@@ -15,6 +15,7 @@ from app.models.students import (
     HomeworkCreate,
     HomeworkUpdate,
     RemarkCreate,
+    RemarkUpdate,
     ReportCardCreate,
     StudentCreate,
     StudentUpdate,
@@ -122,6 +123,13 @@ def list_remarks(student_id: int, user: CurrentUser = Depends(staff), db: Db = D
 def add_remark(student_id: int, body: RemarkCreate, user: CurrentUser = Depends(staff),
                db: Db = Depends(get_db)):
     return student_service.add_remark(db, user, student_id, body)
+
+
+@router.put("/{student_id}/remarks/{remark_id}")
+def update_remark(student_id: int, remark_id: int, body: RemarkUpdate, user: CurrentUser = Depends(staff),
+                  db: Db = Depends(get_db)):
+    """Change a remark's text: the teacher who wrote it, or managers."""
+    return student_service.update_remark(db, user, student_id, remark_id, body)
 
 
 @router.delete("/{student_id}/remarks/{remark_id}")

@@ -208,6 +208,18 @@ def delete_fee(db: Db, actor: CurrentUser, fee_id: int) -> dict:
         fee = db.one("SELECT * FROM fees WHERE id = %s AND org_id = %s FOR UPDATE", (fee_id, db.org))
         if not fee:
             raise NotFound("Fee not found")
+        # money records are never erased (migration 0017 makes the database refuse it too)
+        if fee["status"] == "paid":
+            raise Conflict("This fee has been paid, so it can't be deleted: the payment record has to stay.",
+                           extra={"code": "has_records", "records": {"paid": 1}})
+        open_claims = int(db.scalar(
+            "SELECT COUNT(*) FROM fee_claims WHERE fee_id = %s AND status IN ('pending', 'approved')", (fee_id,)
+        ) or 0)
+        if open_claims:
+            raise Conflict("A parent has sent a payment proof for this fee. Approve or reject it before deleting "
+                           "the fee.", extra={"code": "has_records", "records": {"payment_claims": open_claims}})
+        # rejected proofs go with the fee, as before
+        db.execute("DELETE FROM fee_claims WHERE fee_id = %s AND status = 'rejected'", (fee_id,))
         db.execute("DELETE FROM fees WHERE id = %s", (fee_id,))
         audit.record(db, actor, "fee.delete", "fee", fee_id,
                      {k: fee[k] for k in ("student_id", "title", "amount", "status")})

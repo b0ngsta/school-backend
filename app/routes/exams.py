@@ -5,14 +5,16 @@
 - question paper upload: admin / sub_admin / coordinator / principal
 - exams with class_id = NULL apply to ALL classes
 """
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 
 from app.core.roles import MANAGERS, STAFF
 from app.db import Db
 from app.dependencies import get_db, require_roles
 from app.models.auth import CurrentUser
 from app.models.exams import ExamCreate, ExamUpdate, ResultsSave
+from app.services import exam_results_csv
 from app.services import exams as exam_service
+from app.storage.base import content_disposition
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
@@ -104,6 +106,30 @@ def exam_results(exam_id: int, section_id: int,
                                              description="Leave out for the whole exam; else a subject of the class"),
                  user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
     return exam_service.exam_results(db, user, exam_id, section_id, subject)
+
+
+@router.get("/{exam_id}/results/sheet")
+def results_sheet(exam_id: int, section_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """Every subject's marks for the section in one table (+ totals, % and `can_import`)."""
+    return exam_results_csv.sheet(db, user, exam_id, section_id)
+
+
+@router.get("/{exam_id}/results/template")
+def results_template(exam_id: int, section_id: int, format: str = Query("csv", pattern="^(csv|json)$"),
+                     user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """CSV to fill in (class teacher / managers). `format=json` → {filename, content} for the mobile app."""
+    filename, content = exam_results_csv.template(db, user, exam_id, section_id)
+    if format == "json":
+        return {"filename": filename, "content": content}
+    return Response(content.encode("utf-8"), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": content_disposition(filename, inline=False)})
+
+
+@router.post("/{exam_id}/results/import")
+def import_results(exam_id: int, section_id: int = Form(...), file: UploadFile = File(..., description="The CSV"),
+                   user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """Upload the whole section's marks from the CSV template (class teacher / managers). All or nothing."""
+    return exam_results_csv.import_csv(db, user, exam_id, section_id, file)
 
 
 @router.put("/{exam_id}/results")

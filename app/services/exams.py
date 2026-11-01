@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import UploadFile
 from fastapi.responses import FileResponse
 
-from app.core.errors import BadRequest, Forbidden, NotFound
+from app.core.errors import BadRequest, Conflict, Forbidden, NotFound
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.exams import ExamCreate, ExamUpdate, ResultsSave
@@ -123,6 +123,16 @@ def delete_exam(db: Db, actor: CurrentUser, exam_id: int) -> dict:
         exam = db.one("SELECT paper_path FROM exams WHERE id = %s AND org_id = %s FOR UPDATE", (exam_id, db.org))
         if not exam:
             raise NotFound("Exam not found")
+        # marks are never erased by deleting the exam (migration 0017: the database refuses it too)
+        with_results = int(db.scalar("SELECT COUNT(DISTINCT student_id) FROM exam_results WHERE exam_id = %s",
+                                     (exam_id,)) or 0)
+        if with_results:
+            who = "1 student" if with_results == 1 else f"{with_results:,} students"
+            raise Conflict(
+                f"This exam can't be deleted: it has results for {who}, and deleting it would erase them. "
+                "To hide the marks from parents, unpublish the results instead.",
+                extra={"code": "has_records", "records": {"students_with_results": with_results}},
+            )
         subject_papers = [r["paper_path"] for r in
                           db.all("SELECT paper_path FROM exam_papers WHERE exam_id = %s", (exam_id,))]
         db.execute("DELETE FROM exams WHERE id = %s", (exam_id,))

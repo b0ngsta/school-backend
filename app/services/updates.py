@@ -105,7 +105,8 @@ def _student(db: Db, uid: int) -> dict:
         "attendance": row["attendance"],
         "fees": _newest(row["fees"], row["fee_claims"]),
         "exams": row["exams"],
-        "report_cards": row["report_cards"],
+        # the Performance Report screen (Nov 2026) is built from published results too
+        "report_cards": _newest(row["report_cards"], row["exams"]),
         "holidays": row["holidays"],
         "transport": row["transport"],
     }

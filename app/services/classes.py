@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from app.core.errors import Conflict, DuplicateKey, NotFound
 from app.db import Db
+from app.models.auth import CurrentUser
 from app.models.classes import ClassCreate, SectionCreate, SubjectsUpdate
+from app.services import audit, storage
 
 
 def _clean_subjects(subjects: list[str]) -> list[str]:
@@ -76,9 +78,90 @@ def list_classes(db: Db) -> list[dict]:
     return classes
 
 
-def delete_class(db: Db, class_id: int) -> dict:
-    if db.execute("DELETE FROM classes WHERE id = %s AND org_id = %s", (class_id, db.org)).rowcount == 0:
-        raise NotFound("Class not found")
+# ------------------------------------------------------------------ deleting
+# A class or section can only be deleted while nothing has been recorded in it:
+# deleting used to erase attendance, homework, documents, substitutions, lesson
+# plans and marks along with it (migration 0017 makes the database refuse that
+# too). Current set-up goes with it as before: timetable slots, teacher
+# assignments, subjects, exams without any results (and their question papers);
+# students in it are left without a section, as before.
+
+_RECORD_WORDS = {
+    "attendance": ("attendance record", "attendance records"),
+    "homework": ("homework post", "homework posts"),
+    "documents": ("timetable / syllabus file", "timetable / syllabus files"),
+    "substitutions": ("substitution record", "substitution records"),
+    "lesson_plans": ("lesson plan", "lesson plans"),
+    "exams_with_results": ("exam with results", "exams with results"),
+}
+
+
+def _in(ids: list[int]) -> str:
+    return ",".join(["%s"] * len(ids))
+
+
+def _section_records(db: Db, section_ids: list[int]) -> dict[str, int]:
+    if not section_ids:
+        return {}
+    ph = _in(section_ids)
+    row = db.one(
+        f"SELECT (SELECT COUNT(*) FROM attendance WHERE section_id IN ({ph})) AS attendance, "
+        f"(SELECT COUNT(*) FROM class_homework WHERE section_id IN ({ph})) AS homework, "
+        f"(SELECT COUNT(*) FROM school_documents WHERE section_id IN ({ph})) AS documents, "
+        f"(SELECT COUNT(*) FROM substitution_requests WHERE section_id IN ({ph})) AS substitutions",
+        (*section_ids, *section_ids, *section_ids, *section_ids),
+    ) or {}
+    return {k: int(v or 0) for k, v in row.items()}
+
+
+def _class_records(db: Db, class_id: int, section_ids: list[int]) -> dict[str, int]:
+    ph = _in(section_ids) if section_ids else "NULL"
+    sec = tuple(section_ids)
+    row = db.one(
+        f"SELECT (SELECT COUNT(*) FROM attendance WHERE section_id IN ({ph})) AS attendance, "
+        "(SELECT COUNT(*) FROM class_homework WHERE class_id = %s) AS homework, "
+        f"(SELECT COUNT(*) FROM school_documents WHERE class_id = %s OR section_id IN ({ph})) AS documents, "
+        f"(SELECT COUNT(*) FROM substitution_requests WHERE class_id = %s OR section_id IN ({ph})) "
+        "AS substitutions, "
+        "(SELECT COUNT(*) FROM lesson_plans WHERE class_id = %s) AS lesson_plans, "
+        "(SELECT COUNT(DISTINCT r.exam_id) FROM exam_results r JOIN exams e ON e.id = r.exam_id "
+        " WHERE e.class_id = %s) AS exams_with_results",
+        (*sec, class_id, class_id, *sec, class_id, *sec, class_id, class_id),
+    ) or {}
+    return {k: int(v or 0) for k, v in row.items()}
+
+
+def _describe(records: dict[str, int]) -> str:
+    parts = [f"{n:,} {_RECORD_WORDS[k][0 if n == 1 else 1]}" for k, n in records.items() if n]
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def _refuse(what: str, records: dict[str, int], advice: str) -> None:
+    held = {k: n for k, n in records.items() if n}
+    if held:
+        raise Conflict(f"{what} can't be deleted: it holds {_describe(held)}, and deleting it would erase "
+                       f"them. {advice}", extra={"code": "has_records", "records": held})
+
+
+def delete_class(db: Db, actor: CurrentUser | None, class_id: int) -> dict:
+    with db.transaction():
+        cls = db.one("SELECT id, name FROM classes WHERE id = %s AND org_id = %s FOR UPDATE", (class_id, db.org))
+        if not cls:
+            raise NotFound("Class not found")
+        section_ids = [r["id"] for r in db.all("SELECT id FROM sections WHERE class_id = %s", (class_id,))]
+        _refuse(cls["name"], _class_records(db, class_id, section_ids),
+                "A class with records stays; move its students to another class if it is no longer used.")
+        # exams without results go with the class, as before: remove their question-paper files too
+        papers = [r["paper_path"] for r in db.all(
+            "SELECT paper_path FROM exams WHERE class_id = %s AND paper_path IS NOT NULL "
+            "UNION ALL SELECT p.paper_path FROM exam_papers p WHERE p.class_id = %s AND p.paper_path IS NOT NULL",
+            (class_id, class_id))]
+        students = db.scalar("SELECT COUNT(*) FROM student_profiles WHERE class_id = %s", (class_id,))
+        db.execute("DELETE FROM classes WHERE id = %s", (class_id,))
+        for path in papers:
+            storage.delete_after_commit(db, path)
+        audit.record(db, actor, "class.delete", "class", class_id,
+                     {"name": cls["name"], "sections": len(section_ids), "students_unassigned": int(students or 0)})
     return {"deleted": class_id}
 
 
@@ -97,8 +180,20 @@ def create_section(db: Db, class_id: int, body: SectionCreate) -> dict:
     return {"id": section_id, "class_id": class_id, "name": body.name}
 
 
-def delete_section(db: Db, class_id: int, section_id: int) -> dict:
-    if db.execute("DELETE FROM sections WHERE id = %s AND class_id = %s AND org_id = %s",
-                  (section_id, class_id, db.org)).rowcount == 0:
-        raise NotFound("Section not found")
+def delete_section(db: Db, actor: CurrentUser | None, class_id: int, section_id: int) -> dict:
+    with db.transaction():
+        section = db.one(
+            "SELECT s.id, s.name, c.name AS class_name FROM sections s JOIN classes c ON c.id = s.class_id "
+            "WHERE s.id = %s AND s.class_id = %s AND s.org_id = %s FOR UPDATE",
+            (section_id, class_id, db.org),
+        )
+        if not section:
+            raise NotFound("Section not found")
+        _refuse(f"Section {section['name']}", _section_records(db, [section_id]),
+                "A section with records stays; move its students to another section if it is no longer used.")
+        students = db.scalar("SELECT COUNT(*) FROM student_profiles WHERE section_id = %s", (section_id,))
+        db.execute("DELETE FROM sections WHERE id = %s", (section_id,))
+        audit.record(db, actor, "section.delete", "section", section_id,
+                     {"class_id": class_id, "class": section["class_name"], "name": section["name"],
+                      "students_unassigned": int(students or 0)})
     return {"deleted": section_id}

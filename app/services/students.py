@@ -18,6 +18,7 @@ from app.models.students import (
     HomeworkCreate,
     HomeworkUpdate,
     RemarkCreate,
+    RemarkUpdate,
     ReportCardCreate,
     StudentCreate,
     StudentUpdate,
@@ -261,18 +262,44 @@ def list_remarks(db: Db, user: CurrentUser, student_id: int) -> list[dict]:
 
 def add_remark(db: Db, user: CurrentUser, student_id: int, body: RemarkCreate) -> dict:
     _viewable_student(db, user, student_id)
+    remark = body.remark.strip()
+    if not remark:
+        raise BadRequest("Remark is required")
     remark_id = db.execute(
         "INSERT INTO student_remarks (student_id, remark, created_by) VALUES (%s, %s, %s)",
-        (student_id, body.remark, user.id),
+        (student_id, remark, user.id),
     ).lastrowid
     return {"id": remark_id}
 
 
-def delete_remark(db: Db, user: CurrentUser, student_id: int, remark_id: int) -> dict:
+def _own_remark(db: Db, user: CurrentUser, student_id: int, remark_id: int) -> dict:
+    """The remark, locked, if the caller may change it: whoever wrote it, or managers."""
     _viewable_student(db, user, student_id)
-    if db.execute("DELETE FROM student_remarks WHERE id = %s AND student_id = %s",
-                  (remark_id, student_id)).rowcount == 0:
+    row = db.one("SELECT id, created_by FROM student_remarks WHERE id = %s AND student_id = %s FOR UPDATE",
+                 (remark_id, student_id))
+    if not row:
         raise NotFound("Remark not found")
+    if user.user_type not in MANAGERS and row["created_by"] != user.id:
+        raise Forbidden("Only the teacher who wrote this remark (or admins) can change it")
+    return row
+
+
+def update_remark(db: Db, user: CurrentUser, student_id: int, remark_id: int, body: RemarkUpdate) -> dict:
+    remark = body.remark.strip()
+    if not remark:
+        raise BadRequest("Remark is required")
+    with db.transaction():
+        _own_remark(db, user, student_id, remark_id)
+        db.execute("UPDATE student_remarks SET remark = %s WHERE id = %s", (remark, remark_id))
+        audit.record(db, user, "remark.update", "student_remark", remark_id, {"student_id": student_id})
+    return {"id": remark_id, "remark": remark}
+
+
+def delete_remark(db: Db, user: CurrentUser, student_id: int, remark_id: int) -> dict:
+    with db.transaction():
+        _own_remark(db, user, student_id, remark_id)
+        db.execute("DELETE FROM student_remarks WHERE id = %s", (remark_id,))
+        audit.record(db, user, "remark.delete", "student_remark", remark_id, {"student_id": student_id})
     return {"deleted": remark_id}
 
 

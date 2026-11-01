@@ -9,8 +9,8 @@ from datetime import date
 
 from app.core.errors import NotFound
 from app.db import Db
+from app.services import documents, pagination
 from app.services import homework as class_homework
-from app.services import pagination
 from app.services.calendar import get_calendar_payload
 from app.services.hr import list_holidays
 from app.services.school_profile import session_bounds, session_label
@@ -104,6 +104,8 @@ def dashboard(db: Db, uid: int) -> dict:
         "next_exam": next_exam,
         "pending_fees": {"count": counts["fees_n"], "amount_due": float(counts["fees_due"])},
         "latest_notices": notices,
+        # the home shows a "Full Syllabus" launcher only when the class has one (Nov 2026)
+        "full_syllabus": documents.full_syllabus_count(db, uid),
     }
 
 

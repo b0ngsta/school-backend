@@ -33,7 +33,7 @@ def list_classes(user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
 
 @router.delete("/{class_id}")
 def delete_class(class_id: int, actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
-    return class_service.delete_class(db, class_id)
+    return class_service.delete_class(db, actor, class_id)
 
 
 @router.post("/{class_id}/sections", status_code=201)
@@ -45,4 +45,4 @@ def create_section(class_id: int, body: SectionCreate, actor: CurrentUser = Depe
 @router.delete("/{class_id}/sections/{section_id}")
 def delete_section(class_id: int, section_id: int, actor: CurrentUser = Depends(manager),
                    db: Db = Depends(get_db)):
-    return class_service.delete_section(db, class_id, section_id)
+    return class_service.delete_section(db, actor, class_id, section_id)

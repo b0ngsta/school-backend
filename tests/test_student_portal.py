@@ -214,12 +214,12 @@ def test_timetable_and_syllabus_documents(client, school, s1, s4):
     assert _ok(client.post("/documents", headers=t2, data={"kind": "timetable", "title": "x",
                                                            "section_id": school.c1a}, files=_pdf()), 403)
     assert _ok(client.post("/documents", headers=t1, data={"kind": "timetable", "title": "x"}, files=_pdf()), 400)
-    # syllabus: any teacher of the class, subject required
+    # syllabus: any teacher of the class; no subject = the full syllabus (Nov 2026; was 400)
     syl = _ok(client.post("/documents", headers=t2, data={"kind": "syllabus", "title": "Maths syllabus",
                                                           "class_id": school.c1, "subject": "Math"},
                           files=_pdf()), 201)
     assert _ok(client.post("/documents", headers=t2, data={"kind": "syllabus", "title": "x",
-                                                           "class_id": school.c1}, files=_pdf()), 400)
+                                                           "class_id": school.c1}, files=_pdf()), 201)
     assert _ok(client.post("/documents", headers=t3, data={"kind": "syllabus", "title": "x", "class_id": school.c1,
                                                            "subject": "Math"}, files=_pdf()), 403)
     assert _ok(client.post("/documents", headers=a, data={"kind": "notes", "title": "x"}, files=_pdf()), 400)
