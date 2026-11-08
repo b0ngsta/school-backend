@@ -87,7 +87,7 @@ STATUS_FILTERS = {
 
 
 def list_users(db: Db, user_type: str | None, page: pagination.Page | None = None,
-               status: str = "active") -> pagination.PageResult:
+               status: str = "active", exclude_type: str | None = None) -> pagination.PageResult:
     sql = (
         "SELECT id, username, full_name, email, phone, photo_path, user_type, is_active, left_on, left_reason, "
         "created_at FROM users WHERE org_id = %s"
@@ -98,6 +98,9 @@ def list_users(db: Db, user_type: str | None, page: pagination.Page | None = Non
         params = (db.org, user_type)
     else:
         sql += " AND user_type != 'student'"
+    if exclude_type:
+        sql += " AND user_type != %s"
+        params = (*params, exclude_type)
     sql += STATUS_FILTERS[status]
     return pagination.fetch(db, sql, params, "user_type, full_name, id", page)
 

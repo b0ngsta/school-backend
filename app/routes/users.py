@@ -31,8 +31,11 @@ ReasonQuery = Query(None, max_length=255, description="Why the person left (kept
 
 @router.get("")
 def list_users(response: Response, user_type: str | None = None, status: str = StatusQuery,
+               exclude_type: str | None = Query(None, max_length=20,
+                                                description="Leave this account type out, e.g. teacher "
+                                                            "(the app's Staff users screen; teachers have their own)"),
                page: Page = Depends(page_params), actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
-    return paged(response, user_service.list_users(db, user_type, page, status))
+    return paged(response, user_service.list_users(db, user_type, page, status, exclude_type))
 
 
 @router.put("/{user_id}")
