@@ -76,6 +76,10 @@ class Settings:
     upload_dir: str
     file_url_ttl_hours: int
     image_max_dimension: int
+    image_quality: int            # JPEG/WebP quality for re-encoded uploads
+    photo_max_dimension: int      # profile photos + school logos (shown small)
+    pdf_compress: bool            # shrink PDFs on upload (lossless + downsample big photos inside)
+    pdf_image_max_dimension: int
     storage_backend: str          # "local" | "s3"
     s3_bucket: str
     s3_endpoint_url: str
@@ -231,7 +235,11 @@ def load_settings() -> Settings:
         import_max_zip_mb=env_int("IMPORT_MAX_ZIP_MB", 100, minimum=1),
         upload_dir=env_str("UPLOAD_DIR", "uploads") or "uploads",
         file_url_ttl_hours=env_int("FILE_URL_TTL_HOURS", 24, minimum=1),
-        image_max_dimension=env_int("IMAGE_MAX_DIMENSION", 2560, minimum=256),
+        image_max_dimension=env_int("IMAGE_MAX_DIMENSION", 1920, minimum=256),
+        image_quality=min(95, env_int("IMAGE_QUALITY", 80, minimum=40)),
+        photo_max_dimension=env_int("PHOTO_MAX_DIMENSION", 800, minimum=128),
+        pdf_compress=env_bool("PDF_COMPRESS", True),
+        pdf_image_max_dimension=env_int("PDF_IMAGE_MAX_DIMENSION", 2000, minimum=512),
         storage_backend=storage_backend,
         s3_bucket=env_str("S3_BUCKET", ""),
         s3_endpoint_url=env_str("S3_ENDPOINT_URL", ""),

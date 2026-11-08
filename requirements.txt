@@ -8,6 +8,7 @@ python-dotenv==1.0.1
 PyJWT==2.15.1                 # access tokens
 argon2-cffi==25.1.0           # password hashing
 Pillow==12.3.0                # image validation / re-encoding
+pikepdf==10.13.0.post1        # PDF compression on upload (services/compress.py); optional at runtime
 openpyxl==3.1.5               # Excel (.xlsx) templates and uploads (user import, exam results)
 tzdata==2026.5                # timezone data for zoneinfo in slim images
 alembic==1.20.0               # database migrations

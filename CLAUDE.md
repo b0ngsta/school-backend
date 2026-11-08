@@ -38,7 +38,7 @@ Seed logins (school code `DEFAULT`): admin/admin123, principal/principal123, sub
 - `models/` Pydantic request models per domain; `db/` pool + request-scoped transactional session
 - `core/` config, security (Argon2id, JWT, rotating refresh tokens), signed file URLs, clock (Asia/Kolkata), logging/Sentry
 - `storage/` local or S3 (R2/OCI); `mail/` SMTP or console; `services/user_import/` Excel (.xlsx, CSV still read) + photo-ZIP bulk import; `services/spreadsheet.py` shared .xlsx read/write
-- `cli.py`: `python -m app.cli set-password|revoke-sessions|list-sessions <user> [--org CODE]`, `check-db|check-data|copy-uploads-to-s3`, `list-orgs|create-org|rename-org|change-org-code|disable-org|enable-org`, `run-jobs [--forever]|retry-failed-jobs|cleanup`
+- `cli.py`: `python -m app.cli set-password|revoke-sessions|list-sessions <user> [--org CODE]`, `check-db|check-data|copy-uploads-to-s3|check-storage|missing-uploads|optimize-uploads [--dry-run] [--folder X]`, `list-orgs|create-org|rename-org|change-org-code|disable-org|enable-org`, `run-jobs [--forever]|retry-failed-jobs|cleanup`
 - SQLAlchemy used **only** by Alembic. Migrations: `migrations/versions/0001…0018` (`0010_platform_indexes`, `0011_student_portal`, `0012_driver_routine`, `0013_keep_history`, `0014_login_captcha`, `0015_exam_subject_marks`, `0016_durable_jobs`, `0017_protect_records` (see "Review fixes"), latest `0018_class_notices` (see "Class notices"); table in `docs/OPERATIONS.md`); `legacy/` = old SQL v3–v8. A new head also changes the expected version in `tests/test_migrations.py` and `tests/test_platform.py` (`test_system_status`)
 - `scripts/seed_driver_routine.py` — dev demo data for the driver app: `python -m scripts.seed_driver_routine [--org DEFAULT] [--driver driver] [--vehicle "DEMO VAN 1"]` (needs students in the school; rebuilds the same demo when run again)
 - Docs: `docs/ORGANISATIONS.md`, `docs/AUTH.md`, `docs/OPERATIONS.md`, `docs/FRONTEND_README.md`, `docs/DPDP.md`; deploy: `DEPLOY.md`, `DEPLOY_ORACLE.md`
@@ -122,6 +122,11 @@ Users/students are marked **left** instead of deleted (+ reactivate, `?status=`,
 - On a host that sleeps (Render free) the job worker sleeps with it: queued pushes/emails wait for the next request, and the daily clean-up only runs while awake. Point a cron at `POST /internal/jobs/run` (X-Jobs-Secret) every few minutes.
 - Changing `SECRET_KEY` makes queued job payloads unreadable (those jobs end as `failed`).
 
+## Upload size / bucket (8 Nov 2026, no migration) — `services/compress.py`, `tests/test_upload_size.py` (4)
+- The bucket is 50 GB, so `services/storage.store_bytes` (every upload: photos, logos, claims, events, announcements, notices/homework/documents/class-announcement attachments, exam papers, lesson files, user-import photo ZIPs) now shrinks files before `put`: pictures capped per folder (`photos`/`logos` `PHOTO_MAX_DIMENSION` 800, others `IMAGE_MAX_DIMENSION` 1920, was 2560), `IMAGE_QUALITY` 80 (was 88); an opaque PNG ≥ 200 KB becomes JPEG when ≥ 30 % smaller (not logos; `StoredFile.content_type`, key extension and `original_name` say `.jpg`); PDFs ≥ 100 KB via **pikepdf** (requirements.txt, optional at runtime): big plain RGB/grey pictures inside → ≤ `PDF_IMAGE_MAX_DIMENSION` 2000 px JPEG + compressed object streams, kept only if ≥ 5 % smaller and it reopens; encrypted / broken PDFs untouched (`PDF_COMPRESS=false` turns it off). Never makes a file bigger; upload limits, allowed types, link format unchanged.
+- Existing files: `python -m app.cli optimize-uploads [--dry-run] [--folder photos]` (no DB needed) rewrites in place under the same key (same type, no PNG→JPEG) when ≥ 10 % smaller (`storage.shrink_stored`, `cli.optimize_uploads`). Stores gained `get(key)` (local + S3). Docs: `docs/OPERATIONS.md` "Upload size", `.env.example`.
+- Clients unchanged (web, mobile and the portal all upload through the API). Checked with real-sized files in isolation + ruff clean; the 4 new tests (3 need no DB, 1 API) and the full suite still need a run against MySQL.
+
 ## Conventions
 Dates `YYYY-MM-DD`, times 24h `HH:MM` local, weekday Mon=0…Sat=5. Lists: `?limit=&offset=` + `X-Total-Count` header.
 Errors 400/403/404/409/422/429 with `{"detail"}`. Access JWT 15 min (set 1440 for clients without refresh), refresh 30d idle/180d max.
@@ -136,7 +141,7 @@ TEST_DATABASE_URL=mysql+pymysql://root:pass@127.0.0.1:3306/school_test pytest   
 ruff check .   # py311, line 120
 ```
 Docker: `docker compose up -d --build` (dev), `docker-compose.prod.yml` + Caddy (prod). Image runs migrations on start.
-Deployed instance used by mobile app: https://school-app-docker-v1.onrender.com. Optional: FIREBASE_CREDENTIALS (push), SMTP_* (reset emails), STORAGE_BACKEND=s3,
+Deployed instance (Oracle Cloud, used by all clients): https://bongsta-api.duckdns.org (old: https://school-app-docker-v1.onrender.com). Optional: FIREBASE_CREDENTIALS (push), SMTP_* (reset emails), STORAGE_BACKEND=s3,
 DEFAULT_ORG_CODE (school for requests without org_code; "" = code required), PLATFORM_SECRET (enables /platform/*; 32+ chars, same value in work/dashboard; warning in production if shorter).
 Don't read/commit `.env` (real secrets).
 

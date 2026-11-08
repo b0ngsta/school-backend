@@ -173,6 +173,49 @@ def copy_uploads_to_s3() -> None:
           "Local files were left in place.")
 
 
+def optimize_uploads(store, dry_run: bool = False, folder: str | None = None) -> tuple[int, int, int, int]:
+    """Shrink files that are already stored (uploaded before compression, or with
+    older settings), in place under the same key, so no database row changes.
+    Returns (files checked, files shrunk, bytes before, bytes after) over all files."""
+    from app.services.storage import shrink_stored
+
+    checked = shrunk = before = after = 0
+    for key in store.iter_keys():
+        if key.startswith("_") or (folder and not key.startswith(folder.rstrip("/") + "/")):
+            continue
+        try:
+            data = store.get(key)
+        except Exception as exc:  # noqa: BLE001 - one unreadable file must not stop the run
+            print(f"  skip {key}: {exc}")
+            continue
+        checked += 1
+        before += len(data)
+        new = shrink_stored(key, data)
+        if new is None:
+            after += len(data)
+            continue
+        shrunk += 1
+        after += len(new)
+        print(f"  {key}: {len(data) // 1024} KB -> {len(new) // 1024} KB")
+        if not dry_run:
+            from app.services.storage import _MEDIA_TYPES
+
+            store.put(key, new, _MEDIA_TYPES[os.path.splitext(key)[1].lower()])
+    return checked, shrunk, before, after
+
+
+def optimize_uploads_command(dry_run: bool, folder: str | None) -> None:
+    from app.storage import get_store
+
+    store = get_store()
+    print(f"{'Checking' if dry_run else 'Shrinking'} files in {store.name} ({_describe(store)})...")
+    checked, shrunk, before, after = optimize_uploads(store, dry_run=dry_run, folder=folder)
+    mb = 1024 * 1024
+    verb = "would shrink" if dry_run else "shrunk"
+    print(f"{checked} file(s) checked, {verb} {shrunk}: {before / mb:.1f} MB -> {after / mb:.1f} MB "
+          f"({(before - after) / mb:.1f} MB {'to save' if dry_run else 'saved'}).")
+
+
 def _describe(store) -> str:
     if store.name == "s3":
         return f"s3://{store.bucket}/{store.prefix}"
@@ -334,11 +377,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     parser.add_argument("command", choices=sorted([*USER_COMMANDS, *ORG_COMMANDS, *JOB_COMMANDS, "check-db",
                                                    "check-data", "copy-uploads-to-s3", "check-storage",
-                                                   "missing-uploads"]))
+                                                   "missing-uploads", "optimize-uploads"]))
     parser.add_argument("args", nargs="*", help="username, or school code [and name] for the *-org commands")
     parser.add_argument("--org", help="school code (default: DEFAULT_ORG_CODE)")
     parser.add_argument("--admin-username", default="admin")
     parser.add_argument("--admin-email")
+    parser.add_argument("--dry-run", action="store_true", help="optimize-uploads: only report what it would save")
+    parser.add_argument("--folder", help="optimize-uploads: only this folder, e.g. photos, papers, notices")
     parser.add_argument("--forever", action="store_true", help="run-jobs: keep running (a worker process)")
     args = parser.parse_args()
     if args.command in JOB_COMMANDS:
@@ -346,6 +391,10 @@ def main() -> None:
             JOB_COMMANDS[args.command](args)
         finally:
             pool.close_all()
+        return
+    if args.command == "optimize-uploads":  # storage only, no database needed
+        optimize_uploads_command(args.dry_run, args.folder)
+        pool.close_all()
         return
     needs = {**dict.fromkeys(USER_COMMANDS, 1), "create-org": 2, "rename-org": 2, "change-org-code": 2,
              "disable-org": 1, "enable-org": 1}

@@ -5,6 +5,10 @@ client claims), stored under a random name with an extension chosen by the
 server, and images are re-encoded, which strips hidden metadata such as GPS
 location from phone photos and neutralises crafted files.
 
+Uploads are also made small for the bucket (`services/compress.py`): pictures
+are scaled per folder and re-encoded at IMAGE_QUALITY, big opaque PNGs may be
+stored as JPEG, PDFs are compressed. Nothing is ever made bigger.
+
 Where the bytes live (server disk or an S3-compatible bucket) is decided by
 `app.storage`; the database always stores "uploads/<folder>/<name>", so a
 school can move between the two without touching any data.
@@ -26,6 +30,7 @@ from app.core.config import settings
 from app.core.errors import NotFound, PayloadTooLarge, UnsupportedMediaType
 from app.core.file_urls import relative_upload_path
 from app.db import Db
+from app.services import compress
 from app.storage import get_store
 
 log = logging.getLogger(__name__)
@@ -72,19 +77,46 @@ def save_upload(
 
 def store_bytes(data: bytes, subdir: str, allowed_types: frozenset[str],
                 original_name: str | None = None) -> StoredFile:
-    """Check the bytes, re-encode images and store them under a random name.
-    The caller removes the file again (`delete_file`) if it ends up unused."""
+    """Check the bytes, re-encode images, compress PDFs and store them under a
+    random name. The caller removes the file again (`delete_file`) if it ends
+    up unused."""
     detected = _sniff(data)
     if detected not in allowed_types:
         raise UnsupportedMediaType("File content does not match an allowed file type")
     if detected in IMAGE_TYPES:
-        data = _reencode_image(data, detected)
+        data, stored_type = _reencode_image(data, detected, subdir=subdir,
+                                            allow_jpeg="image/jpeg" in allowed_types)
+        if stored_type != detected:  # opaque PNG stored as JPEG: keep the shown name honest
+            original_name = _with_extension(original_name, EXTENSIONS[stored_type])
+            detected = stored_type
+    elif detected in PDF_TYPES:
+        data = compress.shrink_pdf(data)
 
     name = f"{secrets.token_hex(16)}{EXTENSIONS[detected]}"
     key = f"{subdir}/{name}"
     get_store().put(key, data, detected)
     path = os.path.join(settings.upload_dir, subdir, name)
     return StoredFile(path=path, content_type=detected, original_name=_clean_name(original_name), key=key)
+
+
+def shrink_stored(key: str, data: bytes) -> bytes | None:
+    """Smaller bytes for an already stored file (same type, so the key and every
+    database link stay valid), or None when it cannot be made noticeably smaller.
+    Used by `python -m app.cli optimize-uploads`."""
+    content_type = _MEDIA_TYPES.get(os.path.splitext(key)[1].lower())
+    if _sniff(data) != content_type:
+        return None
+    try:
+        if content_type in IMAGE_TYPES:
+            new, _ = _reencode_image(data, content_type, subdir=key.split("/", 1)[0], allow_jpeg=False)
+        elif content_type in PDF_TYPES:
+            new = compress.shrink_pdf(data)
+        else:
+            return None
+    except UnsupportedMediaType:
+        return None
+    # re-encoding an already compressed picture loses a little each time: only when it really pays
+    return new if len(new) <= len(data) * 0.9 else None
 
 
 def check_image(data: bytes) -> str | None:
@@ -172,17 +204,25 @@ def _sniff(data: bytes) -> str | None:
     return None
 
 
-def _reencode_image(data: bytes, content_type: str) -> bytes:
+def _reencode_image(data: bytes, content_type: str, subdir: str | None = None,
+                    allow_jpeg: bool = False) -> tuple[bytes, str]:
+    """Re-encoded bytes + the type they are in (a big opaque PNG may come back as
+    JPEG when `allow_jpeg`)."""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(io.BytesIO(data)) as img:
                 img.load()
                 img = ImageOps.exif_transpose(img)  # keep phone photos upright
-                limit = settings.image_max_dimension
+                limit = compress.max_dimension_for(subdir)
                 if max(img.size) > limit:
                     img.thumbnail((limit, limit), Image.Resampling.LANCZOS)
-                return _encode(img, content_type)
+                encoded = _encode(img, content_type)
+                if content_type == "image/png" and allow_jpeg and compress.may_convert_png(subdir):
+                    jpeg = compress.png_as_jpeg(img, encoded)
+                    if jpeg is not None:
+                        return jpeg, "image/jpeg"
+                return encoded, content_type
     except (UnidentifiedImageError, OSError, ValueError, SyntaxError,
             Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         log.info("Rejected image upload: %s", exc)
@@ -192,10 +232,11 @@ def _reencode_image(data: bytes, content_type: str) -> bytes:
 def _encode(img: Image.Image, content_type: str) -> bytes:
     out = io.BytesIO()
     fmt = _PIL_FORMATS[content_type]
+    quality = settings.image_quality
     if fmt == "JPEG":
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
-        img.save(out, "JPEG", quality=88, optimize=True, progressive=True)
+        img.save(out, "JPEG", quality=quality, optimize=True, progressive=True)
     elif fmt == "PNG":
         if img.mode not in ("RGB", "RGBA", "L", "LA", "P"):
             img = img.convert("RGBA")
@@ -203,8 +244,15 @@ def _encode(img: Image.Image, content_type: str) -> bytes:
     else:
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
-        img.save(out, "WEBP", quality=88)
+        img.save(out, "WEBP", quality=quality, method=6)
     return out.getvalue()  # EXIF (camera, GPS location) and XMP metadata are not carried over
+
+
+def _with_extension(name: str | None, ext: str) -> str | None:
+    if not name:
+        return name
+    stem, old = os.path.splitext(name)
+    return f"{stem}{ext}" if old.lower() in (".png",) else name
 
 
 def _clean_name(name: str | None) -> str | None:

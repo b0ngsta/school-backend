@@ -107,6 +107,30 @@ python -m app.cli check-storage      # "Storage OK: s3 (s3://school-uploads/)" o
 python -m app.cli missing-uploads    # read-only: rows whose file is not in the store (re-upload those)
 ```
 
+### Upload size (keeps the bucket small — Nov 2026, 50 GB bucket)
+
+Every upload goes through `services/storage.py` → `services/compress.py` before it reaches the
+store (disk or bucket). Nothing is ever made bigger; a file that cannot be improved is stored as sent.
+
+| What | Done on upload | Setting (default) |
+|---|---|---|
+| Profile photos, school logos (`photos/`, `logos/`) | longest side ≤ 800 px, re-encoded | `PHOTO_MAX_DIMENSION=800` |
+| Every other picture (notices, homework, events, fee proofs, announcements, documents) | longest side ≤ 1920 px | `IMAGE_MAX_DIMENSION=1920` (was 2560) |
+| JPEG / WebP quality | 80 (was 88), metadata (GPS) stripped as before | `IMAGE_QUALITY=80` |
+| Opaque PNG ≥ 200 KB (screenshots, scans) | stored as JPEG when ≥ 30 % smaller (new link ends `.jpg`, shown name `x.jpg`); logos and transparent PNGs stay PNG | — |
+| PDFs ≥ 100 KB | pictures inside (scans, phone photos) scaled to ≤ 2000 px (~170 dpi A4) as JPEG, file rewritten with compressed streams; encrypted / broken PDFs untouched; kept only if ≥ 5 % smaller | `PDF_COMPRESS=true`, `PDF_IMAGE_MAX_DIMENSION=2000` |
+
+Typical results: a 5 MB phone photo → ~190 KB as a profile photo, ~0.9 MB on a notice; a scanned PDF
+roughly halves; a text-only PDF can drop 80–90 %. Upload limits (5/8/10/15 MB) are unchanged, so nothing
+that was accepted before is refused now. PDF compression needs `pikepdf` (in requirements.txt; if it is
+missing PDFs are simply stored uncompressed and a warning is logged).
+
+**Files already in the bucket**: `python -m app.cli optimize-uploads --dry-run` reports what would be saved;
+without `--dry-run` it rewrites them **in place under the same key** (no database change, links keep
+working). `--folder photos` limits it to one folder. A file is only rewritten when it gets ≥ 10 % smaller,
+so running it again does almost nothing. In Docker: `docker compose exec api python -m app.cli optimize-uploads`.
+Take a bucket backup / snapshot first if you want to be able to go back to the originals.
+
 ### Hosting without a persistent disk (Render, Railway, Fly without volumes, …)
 
 On these hosts the container's disk is **thrown away on every deploy, restart

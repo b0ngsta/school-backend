@@ -30,6 +30,10 @@ class LocalStore:
             fh.write(data)
         os.replace(tmp, path)  # readers never see a half-written file
 
+    def get(self, key: str) -> bytes:
+        with open(self.path_for(key), "rb") as fh:
+            return fh.read()
+
     def delete(self, key: str) -> None:
         try:
             os.remove(self.path_for(key))
