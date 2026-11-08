@@ -36,6 +36,10 @@ services:
   api:
     build: .
     restart: unless-stopped
+    # every variable in .env.production reaches the app (FIREBASE_CREDENTIALS,
+    # PLATFORM_SECRET, JOBS_SECRET, DEFAULT_ORG_CODE, ...); the values under
+    # `environment:` below win over it, so DATABASE_URL always points at the db container
+    env_file: .env.production
     environment:
       APP_ENV: production
       DATABASE_URL: "mysql+pymysql://${MYSQL_USER:-school}:${MYSQL_PASSWORD}@db:3306/school_app"
