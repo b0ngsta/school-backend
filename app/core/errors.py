@@ -41,6 +41,18 @@ class Forbidden(AppError):
     status_code = 403
 
 
+class FeatureDisabled(Forbidden):
+    """The school's EduManage HQ switched this module off (app/core/features.py).
+    403 {"detail", "code": "feature_disabled", "feature": key} — not 404, which the
+    clients read as "older server"."""
+
+    def __init__(self, key: str):
+        from app.core.features import FEATURES
+        label = FEATURES[key].label if key in FEATURES else key
+        super().__init__(f"{label} is not switched on for your school.",
+                         extra={"code": "feature_disabled", "feature": key})
+
+
 class NotFound(AppError):
     status_code = 404
 

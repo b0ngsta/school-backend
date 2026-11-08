@@ -4,12 +4,13 @@ from fastapi import APIRouter, Depends, Response
 
 from app.core.roles import MANAGERS
 from app.db import Db
-from app.dependencies import get_db, require_roles
+from app.dependencies import get_db, require_feature, require_roles
 from app.models.auth import CurrentUser
 from app.models.transport import StudentTransportSave, VehicleCreate, VehicleUpdate
 from app.services import transport as transport_service
 
-router = APIRouter(prefix="/vehicles", tags=["transport"])
+router = APIRouter(prefix="/vehicles", tags=["transport"],
+                   dependencies=[Depends(require_feature("transport"))])
 
 manager = require_roles(*MANAGERS)
 viewer = require_roles(*MANAGERS, "driver")

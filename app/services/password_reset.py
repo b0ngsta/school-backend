@@ -195,7 +195,7 @@ def reset_password(db: Db, login: str, code: str, new_password: str, org_code: s
         session = sessions.open_session(db, user["id"])
         fresh = db.one(sessions.TOKEN_USER_SQL, (user["id"],))
         email.send_after_commit(db, [_password_changed_email(user)])
-        return auth.token_response(fresh, session)
+        return auth.token_response(fresh, session, db)
 
     return _redeem(db, login, code, org_code, then=finish)
 

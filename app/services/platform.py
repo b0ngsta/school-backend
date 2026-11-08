@@ -35,7 +35,7 @@ from app.core.roles import MANAGERS
 from app.db import Db
 from app.models.platform import PlatformPasswordReset
 from app.models.school import SchoolProfileUpdate
-from app.services import audit, background, dashboard, organisations, school_profile, sessions
+from app.services import audit, background, dashboard, features, organisations, school_profile, sessions
 from app.services import auth as auth_service
 
 TREND_DAYS = 14
@@ -205,8 +205,9 @@ def _logins_trend(db: Db, org_id: int | None = None) -> list[dict]:
 
 # ----------------------------------------------------- every school at once
 
-def _alerts(row: dict, school_day: bool, holiday: bool) -> list[str]:
-    """Short codes the portal turns into "needs attention" badges."""
+def _alerts(row: dict, school_day: bool, holiday: bool, off: set[str] | frozenset[str] = frozenset()) -> list[str]:
+    """Short codes the portal turns into "needs attention" badges (none for a
+    module HQ switched off for the school, migration 0019)."""
     if not row["is_active"]:
         return ["disabled"]
     alerts = []
@@ -216,11 +217,12 @@ def _alerts(row: dict, school_day: bool, holiday: bool) -> list[str]:
         alerts.append("inactive_30d")
     elif row["active_users"]["last_7d"] == 0:
         alerts.append("inactive_7d")
-    if school_day and not holiday and row["active_students"] and not row["attendance_today"]["marked"]:
+    if ("attendance" not in off and school_day and not holiday and row["active_students"]
+            and not row["attendance_today"]["marked"]):
         alerts.append("attendance_not_marked")
-    if row["fees"]["overdue"] > 0:
+    if "fees" not in off and row["fees"]["overdue"] > 0:
         alerts.append("fees_overdue")
-    if row["pending"]["fee_claims"]:
+    if "fees" not in off and row["pending"]["fee_claims"]:
         alerts.append("fee_claims_waiting")
     return alerts
 
@@ -272,6 +274,7 @@ def school_rows(db: Db) -> list[dict]:
         "FROM attendance WHERE date BETWEEN %s AND %s GROUP BY org_id, date", (days[0], days[-1])):
         strips.setdefault(r["org_id"], {})[r["date"]] = _rate(_int(r["present"]), _int(r["marked"]))
 
+    switched_off = features.off_by_org(db)
     school_day = w.today.weekday() in SCHOOL_DAYS
     rows = []
     for org in orgs:
@@ -307,7 +310,9 @@ def school_rows(db: Db) -> list[dict]:
             },
             "last_active_at": _utc_iso(act.get("last_active_at")),
         }
-        row["alerts"] = _alerts(row, school_day, oid in holidays)
+        off = switched_off.get(oid, set())
+        row["features_off"] = sorted(off)  # feature keys HQ switched off for this school (0019)
+        row["alerts"] = _alerts(row, school_day, oid in holidays, off)
         rows.append(row)
     return rows
 
@@ -450,6 +455,8 @@ def school_detail(db: Db, code: str) -> dict:
     return {
         "organisation": _org_public(org),
         "profile": _profile(db, oid),
+        # every catalogue feature with its value for this school (0019)
+        "features": features.school_features(db, oid),
         "today": str(w.today),
         "people": {
             "by_role": people,
@@ -499,7 +506,8 @@ def school_detail(db: Db, code: str) -> dict:
         },
         "managers": [_account(m) for m in managers],
         "recent": [
-            {**item, "at": _school_iso(item["at"])} for item in dashboard.activities(db)
+            {**item, "at": _school_iso(item["at"])}
+            for item in dashboard.activities(db, features.for_org(db, oid))
         ],
     }
 

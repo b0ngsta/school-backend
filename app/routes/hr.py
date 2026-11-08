@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Response
 
 from app.core.roles import MANAGERS, NON_STUDENT
 from app.db import Db
-from app.dependencies import get_db, page_params, paged, require_roles
+from app.dependencies import get_db, page_params, paged, require_feature, require_roles
 from app.models.auth import CurrentUser
 from app.models.hr import HolidayCreate, LeaveCreate, LeaveReview, LeaveUpdate, SalaryCreate
 from app.services import hr as hr_service
@@ -98,23 +98,23 @@ def reject_leave(leave_id: int, body: LeaveReview, actor: CurrentUser = Depends(
 
 # ====================== salaries ======================
 
-@router.get("/salaries/mine")
+@router.get("/salaries/mine", dependencies=[Depends(require_feature("salary"))])
 def my_salaries(actor: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
     return hr_service.my_salaries(db, actor)
 
 
-@router.get("/salaries")
+@router.get("/salaries", dependencies=[Depends(require_feature("salary"))])
 def list_salaries(response: Response, user_id: int | None = None, page: Page = Depends(page_params),
                   actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
     return paged(response, hr_service.list_salaries(db, user_id, page))
 
 
-@router.post("/salaries", status_code=201)
+@router.post("/salaries", status_code=201, dependencies=[Depends(require_feature("salary"))])
 def create_salary(body: SalaryCreate, actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
     return hr_service.save_salary(db, actor, body)
 
 
-@router.delete("/salaries/{salary_id}")
+@router.delete("/salaries/{salary_id}", dependencies=[Depends(require_feature("salary"))])
 def delete_salary(salary_id: int, actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
     return hr_service.delete_salary(db, actor, salary_id)
 

@@ -103,6 +103,8 @@ def fresh_db(migrated_db):
     finally:
         db.execute("SET FOREIGN_KEY_CHECKS = 1")
         db.close()
+    from app.services import features
+    features._cache.clear()  # ids / features_version start over with the restored rows
     yield
 
 

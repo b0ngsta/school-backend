@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
@@ -48,6 +49,9 @@ class TokenResponse(BaseModel):
     org_id: int
     org_code: str
     org_name: str
+    # per-school feature flags (migration 0019): {"fees": true, "transport": false, …};
+    # clients treat a missing map / key as ON (older server)
+    features: dict[str, bool] | None = None
 
 
 LoginResponse = TokenResponse
@@ -102,6 +106,10 @@ class CurrentUser:
     org_id: int
     org_code: str
     org_name: str
+    features: Mapping[str, bool] = field(default_factory=dict)  # this school's flags (0019)
+
+    def has(self, key: str) -> bool:
+        return self.features.get(key, True)
 
     def public(self) -> dict:
         """The /auth/me payload (the original fields plus the organisation)."""
@@ -114,4 +122,5 @@ class CurrentUser:
             "user_type": self.user_type,
             "is_active": self.is_active,
             "organisation": {"id": self.org_id, "code": self.org_code, "name": self.org_name},
+            "features": dict(self.features),
         }

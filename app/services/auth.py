@@ -22,7 +22,7 @@ from app.core.context import client_ip, device_id
 from app.core.errors import BadRequest, Forbidden, Unauthorized
 from app.db import Db
 from app.models.auth import CurrentUser, TokenResponse
-from app.services import audit, captcha, login_throttle, notifications, organisations, sessions
+from app.services import audit, captcha, features, login_throttle, notifications, organisations, sessions
 
 INVALID_CREDENTIALS = "Invalid username or password"
 INVALID_TOKEN = "Invalid or expired token"
@@ -32,7 +32,7 @@ def _invalid_credentials() -> Unauthorized:
     return Unauthorized(INVALID_CREDENTIALS, headers={"WWW-Authenticate": "Bearer"})
 
 
-def token_response(user: dict, session: sessions.IssuedSession) -> TokenResponse:
+def token_response(user: dict, session: sessions.IssuedSession, db: Db | None = None) -> TokenResponse:
     access_token, expires_in = security.create_access_token(
         user_id=user["id"],
         role=user["user_type"],
@@ -52,6 +52,7 @@ def token_response(user: dict, session: sessions.IssuedSession) -> TokenResponse
         org_id=user["org_id"],
         org_code=user["org_code"],
         org_name=user["org_name"],
+        features=dict(features.for_org(db, user["org_id"])) if db is not None else None,
     )
 
 
@@ -90,7 +91,7 @@ def login(db: Db, username: str, password: str, org_code: str | None = None,
                        (security.hash_password(password), user["id"]))
         login_throttle.record(db, key, ip, success=True, device=device)
         session = sessions.open_session(db, user["id"])
-    return token_response({**user, "org_code": org["code"], "org_name": org["name"]}, session)
+    return token_response({**user, "org_code": org["code"], "org_name": org["name"]}, session, db)
 
 
 def _record_failure(db: Db, key: str, ip: str | None, device: str | None = None) -> None:
@@ -113,7 +114,8 @@ def authenticate(db: Db, token: str) -> CurrentUser:
     row = db.one(
         "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.user_type, u.is_active, "
         "u.token_version, u.must_change_password, s.id AS session_id, s.revoked_at, "
-        "u.org_id, o.code AS org_code, o.name AS org_name, o.is_active AS org_active "
+        "u.org_id, o.code AS org_code, o.name AS org_name, o.is_active AS org_active, "
+        "o.features_version "
         "FROM users u JOIN organisations o ON o.id = u.org_id "
         "LEFT JOIN auth_sessions s ON s.id = %s AND s.user_id = u.id "
         "WHERE u.id = %s",
@@ -145,6 +147,7 @@ def authenticate(db: Db, token: str) -> CurrentUser:
         org_id=row["org_id"],
         org_code=row["org_code"],
         org_name=row["org_name"],
+        features=features.for_org(db, row["org_id"], int(row["features_version"] or 0)),
     )
 
 
@@ -152,7 +155,7 @@ def authenticate(db: Db, token: str) -> CurrentUser:
 
 def refresh(db: Db, refresh_token: str) -> TokenResponse:
     user, session = sessions.rotate(db, refresh_token)
-    return token_response(user, session)
+    return token_response(user, session, db)
 
 
 # ---------------------------------------------------------------- logout
@@ -196,7 +199,7 @@ def change_password(db: Db, user: CurrentUser, current_password: str, new_passwo
         audit.record(db, user, "auth.password_changed", "user", user.id)
         session = sessions.open_session(db, user.id)
         fresh = db.one(sessions.TOKEN_USER_SQL, (user.id,))
-    return token_response(fresh, session)
+    return token_response(fresh, session, db)
 
 
 def set_password(db: Db, user_id: int, new_password: str, *, reason: str) -> None:

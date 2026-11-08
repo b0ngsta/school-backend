@@ -12,6 +12,9 @@ the operator for the audit log.
     GET   /platform/organisations/{code}                       one school in depth
     PATCH /platform/organisations/{code}                       rename, change code, disable / enable
     PUT   /platform/organisations/{code}/profile               school profile (director, affiliation, contacts…)
+    GET   /platform/features                                   the feature catalogue (key, label, description, default)
+    GET   /platform/organisations/{code}/features              the school's features (enabled, source, note, who)
+    PATCH /platform/organisations/{code}/features              switch features on / off / back to default
     GET   /platform/organisations/{code}/users                 accounts (?role=&q=&active=&limit=&offset=)
     POST  /platform/organisations/{code}/users/{id}/password   set a new password (ends the user's sessions)
     POST  /platform/organisations/{code}/users/{id}/sign-out   end every session of the user
@@ -20,13 +23,14 @@ the operator for the audit log.
 """
 from fastapi import APIRouter, Depends, Query, Response
 
+from app.core.features import CATALOGUE
 from app.db import Db
 from app.dependencies import get_db, platform_operator
 from app.models.common import UserType
 from app.models.organisations import OrganisationCreate, OrganisationUpdate
-from app.models.platform import PlatformPasswordReset
+from app.models.platform import FeaturesUpdate, PlatformPasswordReset
 from app.models.school import SchoolProfileUpdate
-from app.services import organisations, platform
+from app.services import features, organisations, platform
 
 router = APIRouter(prefix="/platform", tags=["platform"], dependencies=[Depends(platform_operator)])
 
@@ -68,6 +72,26 @@ def update_school_profile(code: str, body: SchoolProfileUpdate, db: Db = Depends
                           operator: str | None = Depends(platform_operator)):
     """The school's profile shown in the apps (fields left out keep their value; "" clears)."""
     return platform.update_profile(db, code, body, operator)
+
+
+@router.get("/features")
+def feature_catalogue():
+    """Every feature HQ can switch per school (app/core/features.py)."""
+    return [f.public() for f in CATALOGUE]
+
+
+@router.get("/organisations/{code}/features")
+def school_features(code: str, db: Db = Depends(get_db)):
+    return features.get_for_school(db, code)
+
+
+@router.patch("/organisations/{code}/features")
+def update_school_features(code: str, body: FeaturesUpdate, db: Db = Depends(get_db),
+                           operator: str | None = Depends(platform_operator)):
+    """`{"changes": {"transport": false, "fees": null}, "note": "…"}` — off hides the module from
+    every user of the school (API 403 `feature_disabled`); nothing is deleted. Audited
+    (`organisation.features_update`). Returns the school's full list."""
+    return features.update_for_school(db, code, body.changes, body.note, operator)
 
 
 @router.get("/organisations/{code}/users")

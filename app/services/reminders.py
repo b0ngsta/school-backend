@@ -13,7 +13,7 @@ from datetime import timedelta
 
 from app.core.clock import school_today
 from app.db import Db
-from app.services import notify
+from app.services import features, notify
 
 DUE_SOON_DAYS = 3
 OVERDUE_CATCH_UP_DAYS = 7
@@ -22,9 +22,10 @@ OVERDUE_CATCH_UP_DAYS = 7
 def send_fee_reminders(db: Db) -> dict:
     today = school_today()
     sent = {"due_soon": 0, "overdue": 0}
+    skip = features.orgs_with_off(db, "fees")  # schools whose Fees module HQ switched off (0019)
     with db.transaction():
         due_soon = db.all(
-            "SELECT f.id, f.student_id, f.title, f.amount, f.due_date FROM fees f "
+            "SELECT f.id, f.org_id, f.student_id, f.title, f.amount, f.due_date FROM fees f "
             "JOIN users u ON u.id = f.student_id AND u.is_active = 1 "
             "WHERE f.status = 'pending' AND f.due_date BETWEEN %s AND %s "
             "AND NOT EXISTS (SELECT 1 FROM fee_reminders_sent r WHERE r.fee_id = f.id AND r.kind = 'due_soon') "
@@ -32,7 +33,7 @@ def send_fee_reminders(db: Db) -> dict:
             (today, today + timedelta(days=DUE_SOON_DAYS)),
         )
         overdue = db.all(
-            "SELECT f.id, f.student_id, f.title, f.amount, f.due_date FROM fees f "
+            "SELECT f.id, f.org_id, f.student_id, f.title, f.amount, f.due_date FROM fees f "
             "JOIN users u ON u.id = f.student_id AND u.is_active = 1 "
             "WHERE f.status = 'pending' AND f.due_date < %s AND f.due_date >= %s "
             "AND NOT EXISTS (SELECT 1 FROM fee_reminders_sent r WHERE r.fee_id = f.id AND r.kind = 'overdue') "
@@ -40,6 +41,7 @@ def send_fee_reminders(db: Db) -> dict:
             (today, today - timedelta(days=OVERDUE_CATCH_UP_DAYS)),
         )
         for kind, fees in (("due_soon", due_soon), ("overdue", overdue)):
+            fees = [f for f in fees if f["org_id"] not in skip]
             if not fees:
                 continue
             # INSERT IGNORE: a parallel run that got there first keeps its row and we skip

@@ -1,6 +1,7 @@
 """Role-aware dashboard stats, weekly attendance series, activity feed."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import timedelta
 
 from app.core.clock import school_today
@@ -66,9 +67,16 @@ def attendance_week(db: Db) -> list[dict]:
     return out
 
 
-def activities(db: Db) -> list[dict]:
+# activity type -> school feature (0019): events of a switched-off module are left out
+_ACTIVITY_FEATURE = {"payment": "fees", "lesson": "lesson_plans"}
+
+
+def activities(db: Db, features: Mapping[str, bool] | None = None) -> list[dict]:
     """Latest events across modules (newest first)."""
-    return db.all(ACTIVITIES_SQL, {"org": db.org})
+    rows = db.all(ACTIVITIES_SQL, {"org": db.org})
+    if features:
+        rows = [r for r in rows if features.get(_ACTIVITY_FEATURE.get(r["type"], ""), True)]
+    return rows
 
 
 def stats(db: Db, user: CurrentUser) -> dict:

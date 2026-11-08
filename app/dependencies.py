@@ -11,7 +11,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import settings
 from app.core.context import set_user_id
-from app.core.errors import Forbidden, NotFound, Unauthorized
+from app.core.errors import FeatureDisabled, Forbidden, NotFound, Unauthorized
+from app.core.features import FEATURES
 from app.db import Db, pool
 from app.models.auth import CurrentUser
 from app.services import auth as auth_service
@@ -74,6 +75,22 @@ def require_roles(*roles: str):
         return user
 
     return checker
+
+
+def require_feature(key: str):
+    """Dependency factory: 403 feature_disabled when EduManage HQ switched `key`
+    off for the caller's school (app/core/features.py). Put it on a whole router:
+    `APIRouter(..., dependencies=[Depends(require_feature("fees"))])`.
+    get_current_user is cached per request, so this adds no second sign-in check."""
+    if key not in FEATURES:  # a typo fails at import time, never as an open door
+        raise RuntimeError(f"Unknown feature {key!r}")
+
+    def check(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+        if not user.has(key):
+            raise FeatureDisabled(key)
+        return user
+
+    return check
 
 
 def page_params(

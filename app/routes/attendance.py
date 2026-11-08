@@ -9,12 +9,13 @@ from fastapi import APIRouter, Depends
 
 from app.core.roles import STAFF
 from app.db import Db
-from app.dependencies import get_db, require_roles
+from app.dependencies import get_db, require_feature, require_roles
 from app.models.attendance import AttendanceMark
 from app.models.auth import CurrentUser
 from app.services import attendance as attendance_service
 
-router = APIRouter(prefix="/attendance", tags=["attendance"])
+router = APIRouter(prefix="/attendance", tags=["attendance"],
+                   dependencies=[Depends(require_feature("attendance"))])
 
 staff = require_roles(*STAFF)
 

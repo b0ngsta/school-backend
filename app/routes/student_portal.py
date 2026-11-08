@@ -10,7 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Query, Response
 
 from app.db import Db
-from app.dependencies import get_db, page_params, paged, require_roles
+from app.dependencies import get_db, page_params, paged, require_feature, require_roles
 from app.models.auth import CurrentUser
 from app.services import (
     announcements,
@@ -35,7 +35,7 @@ def my_profile(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
 
 @router.get("/dashboard")
 def my_dashboard(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
-    return portal.dashboard(db, user.id)
+    return portal.dashboard(db, user.id, user.features)
 
 
 @router.get("/homework")
@@ -62,18 +62,18 @@ def my_report_cards(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     return portal.report_cards(db, user.id)
 
 
-@router.get("/attendance")
+@router.get("/attendance", dependencies=[Depends(require_feature("attendance"))])
 def my_attendance(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     return portal.attendance(db, user.id)
 
 
-@router.get("/attendance/overview")
+@router.get("/attendance/overview", dependencies=[Depends(require_feature("attendance"))])
 def my_attendance_overview(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     """Session totals (working days, present, half days, absent, holidays, %) + a row per month."""
     return student_attendance.overview(db, user.id)
 
 
-@router.get("/attendance/month")
+@router.get("/attendance/month", dependencies=[Depends(require_feature("attendance"))])
 def my_attendance_month(year: int, month: int, user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     """Every day of the month with its status, and the month's summary."""
     return student_attendance.month(db, user.id, year, month)
@@ -84,7 +84,7 @@ def my_exams(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     return portal.exams(db, user.id)
 
 
-@router.get("/fees")
+@router.get("/fees", dependencies=[Depends(require_feature("fees"))])
 def my_fees(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     return portal.fees(db, user.id)
 
@@ -161,7 +161,7 @@ def my_performance(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     return performance.report(db, user.id)
 
 
-@router.get("/transport")
+@router.get("/transport", dependencies=[Depends(require_feature("transport"))])
 def my_transport(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     """Vehicle, driver, stop and times — null when the student doesn't use school transport."""
     return transport.for_student(db, user.id)

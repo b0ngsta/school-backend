@@ -14,12 +14,13 @@ from fastapi import APIRouter, Depends, Query, Response
 from app.core.clock import school_today
 from app.core.roles import MANAGERS
 from app.db import Db
-from app.dependencies import get_db, require_roles
+from app.dependencies import get_db, require_feature, require_roles
 from app.models.auth import CurrentUser
 from app.models.driver_routine import ShiftCreate, ShiftStudentsSave, ShiftUpdate
 from app.services import driver_routine as routine_service
 
-router = APIRouter(tags=["transport"])
+router = APIRouter(tags=["transport"],
+                   dependencies=[Depends(require_feature("transport"))])
 
 driver_only = require_roles("driver")
 manager = require_roles(*MANAGERS)

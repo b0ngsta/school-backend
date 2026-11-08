@@ -3,13 +3,14 @@ from fastapi import APIRouter, Depends, Response
 
 from app.core.roles import MANAGERS
 from app.db import Db
-from app.dependencies import get_db, page_params, paged, require_roles
+from app.dependencies import get_db, page_params, paged, require_feature, require_roles
 from app.models.auth import CurrentUser
 from app.models.payments import TransactionCreate
 from app.services import payments as payment_service
 from app.services.pagination import Page
 
-router = APIRouter(prefix="/transactions", tags=["payments"])
+router = APIRouter(prefix="/transactions", tags=["payments"],
+                   dependencies=[Depends(require_feature("fees"))])
 
 manager = require_roles(*MANAGERS)
 

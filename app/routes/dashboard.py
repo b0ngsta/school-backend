@@ -22,7 +22,7 @@ def attendance_week(user: CurrentUser = Depends(staff), db: Db = Depends(get_db)
 @router.get("/activities")
 def activities(actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
     """Latest events across modules (newest first)."""
-    return dashboard_service.activities(db)
+    return dashboard_service.activities(db, actor.features)
 
 
 @router.get("/stats")

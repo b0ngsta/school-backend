@@ -53,8 +53,15 @@ def _newest(*values: datetime | None) -> datetime | None:
     return max(present) if present else None
 
 
+# section key -> the school feature it belongs to (migration 0019): sections of a
+# feature switched off for the school are left out, so no red dot appears for them
+SECTION_FEATURE = {"attendance": "attendance", "fees": "fees", "fee_claims": "fees",
+                   "transport": "transport", "salary": "salary"}
+
+
 def for_user(db: Db, user: CurrentUser) -> dict:
     sections = _student(db, user.id) if user.user_type == "student" else _staff(db, user)
+    sections = {k: v for k, v in sections.items() if user.has(SECTION_FEATURE.get(k, k))}
     return {"server_time": _iso(school_now()), "sections": sections}
 
 

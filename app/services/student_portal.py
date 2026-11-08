@@ -5,6 +5,7 @@ client, so a student can only ever see their own data.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 
 from app.core.errors import NotFound
@@ -52,7 +53,7 @@ def _attendance_summary(db: Db, uid: int) -> dict:
     }
 
 
-def dashboard(db: Db, uid: int) -> dict:
+def dashboard(db: Db, uid: int, features: Mapping[str, bool] | None = None) -> dict:
     """Everything on the student home screen in five round trips (incl. the school's name,
     logo and current session for the header)."""
     me = profile(db, uid)
@@ -98,13 +99,18 @@ def dashboard(db: Db, uid: int) -> dict:
     school = db.one("SELECT name, code, logo_path, session_start_month FROM organisations WHERE id = %s", (db.org,))
     start, end = session_bounds(int(school.pop("session_start_month") or 4))
     school["session"] = session_label(start, end)
+    features = features or {}
+    if not features.get("attendance", True):  # switched off by HQ (0019): same keys, nothing in them
+        attendance_summary = {"total": 0, "present": 0, "absent": 0, "on_leave": 0, "percent": None}
+    fees_on = features.get("fees", True)
     return {
         "profile": me,
         "school": school,
         "pending_homework": counts["pending_homework"],
         "attendance": attendance_summary,
         "next_exam": next_exam,
-        "pending_fees": {"count": counts["fees_n"], "amount_due": float(counts["fees_due"])},
+        "pending_fees": ({"count": counts["fees_n"], "amount_due": float(counts["fees_due"])} if fees_on
+                         else {"count": 0, "amount_due": 0.0}),
         "latest_notices": notices,
         # the home shows a "Full Syllabus" launcher only when the class has one (Nov 2026)
         "full_syllabus": documents.full_syllabus_count(db, uid),

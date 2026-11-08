@@ -3,12 +3,13 @@ from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
 
 from app.core.roles import STAFF
 from app.db import Db
-from app.dependencies import get_db, page_params, paged, require_roles
+from app.dependencies import get_db, page_params, paged, require_feature, require_roles
 from app.models.auth import CurrentUser
 from app.services import lessons as lesson_service
 from app.services.pagination import Page
 
-router = APIRouter(prefix="/lessons", tags=["lesson plans"])
+router = APIRouter(prefix="/lessons", tags=["lesson plans"],
+                   dependencies=[Depends(require_feature("lesson_plans"))])
 
 staff = require_roles(*STAFF)
 

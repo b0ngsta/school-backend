@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query, Response
 
 from app.core.roles import MANAGERS, STAFF
 from app.db import Db
-from app.dependencies import get_db, page_params, paged, require_roles
+from app.dependencies import get_db, page_params, paged, require_feature, require_roles
 from app.models.auth import CurrentUser
 from app.models.students import (
     HomeworkCreate,
@@ -80,7 +80,7 @@ def reactivate_student(student_id: int, user: CurrentUser = Depends(manager), db
 
 # ================= attendance history =================
 
-@router.get("/{student_id}/attendance")
+@router.get("/{student_id}/attendance", dependencies=[Depends(require_feature("attendance"))])
 def student_attendance(student_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
     return student_service.attendance_history(db, user, student_id)
 
