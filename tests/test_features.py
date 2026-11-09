@@ -18,8 +18,9 @@ OPERATOR = {**PLATFORM, "X-Platform-Actor": "owner@example.com"}
 GATED = {
     "attendance": [("teacher1", "teachpass", ["/attendance/stats"]),
                    ("student1", "studpass", ["/student/attendance", "/student/attendance/overview"])],
-    "fees": [("admin", None, ["/fees", "/fees/stats", "/fees/claims", "/transactions"]),
-             ("student1", "studpass", ["/student/fees", "/fees/claims/mine"])],
+    "fees": [("admin", None, ["/fees", "/fees/stats", "/fees/claims", "/transactions", "/fee-claim-forms",
+                              "/fee-claim-forms/stats"]),
+             ("student1", "studpass", ["/student/fees", "/fees/claims/mine", "/student/fee-claims"])],
     "transport": [("admin", None, ["/vehicles", "/vehicles/stats"]),
                   ("student1", "studpass", ["/student/transport"])],
     "lesson_plans": [("teacher1", "teachpass", ["/lessons"])],

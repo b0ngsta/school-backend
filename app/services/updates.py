@@ -18,9 +18,9 @@ and two phones on the same parent login each keep their own dots.
     }
 
 Section keys depend on the role (students: homework, notices, class_announcements, remarks,
-timetable, syllabus, events, attendance, fees, exams, report_cards,
+timetable, syllabus, events, attendance, fees, fee_claim_forms, exams, report_cards,
 holidays, transport — staff: notices, holidays, leaves, substitutions and,
-by role, timetable, salary, fee_claims). Every key is always present for
+by role, timetable, salary, fee_claims, fee_claim_forms). Every key is always present for
 the role; `latest_at` is null when the section is empty. Times are ISO 8601
 with the school's UTC offset (TIMESTAMP columns are read in school time).
 
@@ -37,7 +37,7 @@ from app.db import Db
 from app.models.auth import CurrentUser
 
 STUDENT_SECTIONS = ("homework", "notices", "class_announcements", "remarks", "timetable", "syllabus", "events",
-                    "attendance", "fees", "exams", "report_cards", "holidays", "transport")
+                    "attendance", "fees", "fee_claim_forms", "exams", "report_cards", "holidays", "transport")
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -55,7 +55,7 @@ def _newest(*values: datetime | None) -> datetime | None:
 
 # section key -> the school feature it belongs to (migration 0019): sections of a
 # feature switched off for the school are left out, so no red dot appears for them
-SECTION_FEATURE = {"attendance": "attendance", "fees": "fees", "fee_claims": "fees",
+SECTION_FEATURE = {"attendance": "attendance", "fees": "fees", "fee_claims": "fees", "fee_claim_forms": "fees",
                    "transport": "transport", "salary": "salary"}
 
 
@@ -97,6 +97,9 @@ def _student(db: Db, uid: int) -> dict:
         "(SELECT MAX(f.created_at) FROM fees f WHERE f.student_id = %(uid)s AND f.org_id = %(org)s) AS fees, "
         "(SELECT MAX(fc.reviewed_at) FROM fee_claims fc WHERE fc.student_id = %(uid)s AND fc.org_id = %(org)s) "
         "  AS fee_claims, "
+        # fee claim forms (0020): one of yours was accepted / declined
+        "(SELECT MAX(ff.reviewed_at) FROM fee_claim_forms ff WHERE ff.student_id = %(uid)s "
+        "  AND ff.org_id = %(org)s) AS fee_claim_forms, "
         "(SELECT MAX(r.updated_at) FROM exam_results r JOIN exams e ON e.id = r.exam_id "
         "  WHERE r.student_id = %(uid)s AND e.org_id = %(org)s AND e.results_published = 1) AS exams, "
         "(SELECT MAX(rc.created_at) FROM report_cards rc WHERE rc.student_id = %(uid)s) AS report_cards, "
@@ -115,6 +118,7 @@ def _student(db: Db, uid: int) -> dict:
         "events": row["events"],
         "attendance": row["attendance"],
         "fees": _newest(row["fees"], row["fee_claims"]),
+        "fee_claim_forms": row["fee_claim_forms"],
         "exams": row["exams"],
         # the Performance Report screen (Nov 2026) is built from published results too
         "report_cards": _newest(row["report_cards"], row["exams"]),
@@ -130,9 +134,9 @@ def _student(db: Db, uid: int) -> dict:
 def staff_sections(role: str) -> tuple[str, ...]:
     """Section keys for a staff role (matches the launcher of that role in the app)."""
     if role in MANAGERS:
-        return ("notices", "holidays", "leaves", "substitutions", "fee_claims")
+        return ("notices", "holidays", "leaves", "substitutions", "fee_claims", "fee_claim_forms")
     if role == "teacher":
-        return ("notices", "holidays", "leaves", "substitutions", "timetable", "salary")
+        return ("notices", "holidays", "leaves", "substitutions", "timetable", "salary", "fee_claim_forms")
     return ("notices", "holidays", "leaves", "salary")  # driver
 
 
@@ -163,7 +167,13 @@ def _staff(db: Db, user: CurrentUser) -> dict:
         "(SELECT MAX(sr.created_at) FROM salary_records sr WHERE sr.org_id = %(org)s AND sr.user_id = %(uid)s) "
         "  AS salary, "
         "(SELECT MAX(fc.created_at) FROM fee_claims fc WHERE fc.org_id = %(org)s AND fc.status = 'pending') "
-        "  AS fee_claims",
+        "  AS fee_claims, "
+        # fee claim forms waiting (0020): managers every one · teachers the sections they are class teacher of
+        "(SELECT MAX(ff.created_at) FROM fee_claim_forms ff WHERE ff.org_id = %(org)s AND ff.status = 'pending'"
+        + ("" if manager else
+           " AND ff.section_id IN (SELECT ta.section_id FROM teacher_assignments ta WHERE ta.org_id = %(org)s "
+           "AND ta.teacher_id = %(uid)s AND ta.role = 'class_teacher')")
+        + ") AS fee_claim_forms",
         p,
     )
     return {key: {"latest_at": _iso(row[key])} for key in keys}

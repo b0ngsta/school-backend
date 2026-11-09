@@ -29,6 +29,7 @@ Revisions so far:
 | `0017_protect_records` | Deleting a class, section, exam or fee can't erase records any more: the foreign keys from attendance, class homework, school documents, substitutions, lesson plans (class), exam results and payment proofs become `RESTRICT` (were `CASCADE`). The API refuses such deletes with a message (409 `code: has_records`); deleting something with nothing recorded works as before. No data changes. |
 | `0018_class_notices` | Notices for chosen classes (`notices.audience` / `audience_label` + `notice_classes`; existing notices stay whole-school) and teachers' class announcements (`class_announcements` with org_id + `class_announcement_sections`). Additive only. |
 | `0019_features` | Per-school feature flags set from EduManage HQ: `organisation_features` (only the overrides; no row = the default, ON) + `organisations.features_version` (cache stamp). Additive only; every school keeps every module until HQ switches one off. |
+| `0020_fee_claim_forms` | Parents' fee claim forms (`fee_claim_forms`: purpose / optional fee, amount, date paid, method, reference, note, one PDF or photo, status pending/accepted/declined/withdrawn, reviewer). Reviewed by the class teacher of the section or managers. Additive only; the older `fee_claims` payment proofs are untouched. |
 
 **First upgrade of an existing database** (your TiDB):
 

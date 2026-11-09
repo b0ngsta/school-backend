@@ -123,6 +123,10 @@ class Filled:
         self.claim = _ok(c.post(f"/fees/{self.fee}/claims", headers=bearer(self.s),
                                 data={"method": "upi", "note": f"{mark} proof"},
                                 files={"file": ("proof.png", _png(), "image/png")}), 201)["id"]
+        # fee claim form (0020), not linked to a fee
+        self.claim_form = _ok(c.post("/student/fee-claims", headers=bearer(self.s), data={
+            "amount": "700", "paid_on": str(school_today()), "method": "upi", "purpose": f"{mark} tuition"},
+            files={"file": ("r.pdf", PDF_BYTES, "application/pdf")}), 201)["id"]
 
         # student-portal features (migration 0011)
         _ok(c.put("/school", headers=a, json={"director_name": f"{mark} Director"}))
@@ -304,6 +308,8 @@ def test_every_list_shows_only_the_own_school(client, schools):
             f"/imports/users/export?user_type=student&class_id={me.cls}&section_id={me.sec}",
             "/imports/users/export?user_type=teacher",
             "/staff-attendance?limit=50", "/fees/claims?limit=50", "/transactions?limit=50",
+            f"/fee-claim-forms/{me.claim_form}", f"/fee-claim-forms?section_id={me.sec}",
+            f"/student/fee-claims/{me.claim_form}",
             f"/vehicles/{me.vehicle}/students",
             f"/events/{me.school_event}", "/events?status=upcoming",
             f"/student/notices/{me.notice}", "/student/remarks",
@@ -362,6 +368,12 @@ def test_ids_from_another_school_are_not_found(client, schools):
         c.put(f"/fees/{a.fee}/pay", headers=h, json={"method": "cash"}),
         c.delete(f"/fees/{a.fee}", headers=h),
         c.put(f"/fees/claims/{a.claim}/approve", headers=h, json={}),
+        c.put(f"/fee-claim-forms/{a.claim_form}/accept", headers=h, json={}),
+        c.put(f"/fee-claim-forms/{a.claim_form}/decline", headers=h, json={}),
+        c.post(f"/student/fee-claims/{a.claim_form}/withdraw", headers=bearer(b.s)),
+        c.post("/student/fee-claims", headers=bearer(b.s), data={"amount": "1", "paid_on": str(school_today()),
+                                                                 "fee_id": str(a.fee)},
+               files={"file": ("r.pdf", PDF_BYTES, "application/pdf")}),
         c.post(f"/fees/{a.fee}/claims", headers=bearer(b.s), data={"method": "upi"},
                files={"file": ("proof.png", _png(), "image/png")}),
         c.post("/transactions", headers=h, json={"student_id": a.student, "amount": 1, "method": "cash"}),
