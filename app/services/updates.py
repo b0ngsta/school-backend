@@ -18,7 +18,7 @@ and two phones on the same parent login each keep their own dots.
     }
 
 Section keys depend on the role (students: homework, notices, class_announcements, remarks,
-timetable, syllabus, events, attendance, fees, fee_claim_forms, exams, report_cards,
+timetable, syllabus, events, attendance, fees, exams, report_cards,
 holidays, transport — staff: notices, holidays, leaves, substitutions and,
 by role, timetable, salary, fee_claims, fee_claim_forms). Every key is always present for
 the role; `latest_at` is null when the section is empty. Times are ISO 8601
@@ -37,7 +37,7 @@ from app.db import Db
 from app.models.auth import CurrentUser
 
 STUDENT_SECTIONS = ("homework", "notices", "class_announcements", "remarks", "timetable", "syllabus", "events",
-                    "attendance", "fees", "fee_claim_forms", "exams", "report_cards", "holidays", "transport")
+                    "attendance", "fees", "exams", "report_cards", "holidays", "transport")
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -117,8 +117,8 @@ def _student(db: Db, uid: int) -> dict:
         "syllabus": row["syllabus"],
         "events": row["events"],
         "attendance": row["attendance"],
-        "fees": _newest(row["fees"], row["fee_claims"]),
-        "fee_claim_forms": row["fee_claim_forms"],
+        # the parent's Fees screen also holds the fee claim forms (0020): a reviewed one lights it
+        "fees": _newest(row["fees"], row["fee_claims"], row["fee_claim_forms"]),
         "exams": row["exams"],
         # the Performance Report screen (Nov 2026) is built from published results too
         "report_cards": _newest(row["report_cards"], row["exams"]),

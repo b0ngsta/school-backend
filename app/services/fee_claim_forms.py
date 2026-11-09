@@ -10,7 +10,8 @@ bank slip / screenshot). Reviewers accept or decline it:
 Subject teachers and drivers never see them. Accepting a form linked to an
 unpaid fee also marks that fee paid and records a transaction (same as the
 office's "Mark paid"), unless the reviewer unticks it. The parent gets a
-push on accept / decline; the reviewers get one when a form arrives.
+push on accept / decline (opens the app's Fees screen, where the claim form
+lives); the reviewers get one when a form arrives.
 
 Separate from the older per-fee payment proofs (services/fees.py
 `submit_claim`, table fee_claims), which are unchanged.
@@ -260,7 +261,7 @@ def accept(db: Db, user: CurrentUser, form_id: int, body: FeeClaimFormAccept) ->
             text = f"{text} {body.note.strip()}" if text else body.note.strip()
         notify.notify(db, [form["student_id"]], NOTIFY_TYPE,
                       f"✅ Fee claim accepted: {form['purpose']} {notify.inr(form['amount'])}", text,
-                      data={"route": "FeeClaimForm", "params": {"id": form_id}})
+                      data={"route": "Fees", "params": {"id": form_id}})
     return get_staff(db, user, form_id)
 
 
@@ -276,5 +277,5 @@ def decline(db: Db, user: CurrentUser, form_id: int, body: FeeClaimFormDecline) 
         notify.notify(db, [form["student_id"]], NOTIFY_TYPE,
                       f"Fee claim declined: {form['purpose']} {notify.inr(form['amount'])}",
                       note or "Please contact the school.",
-                      data={"route": "FeeClaimForm", "params": {"id": form_id}})
+                      data={"route": "Fees", "params": {"id": form_id}})
     return get_staff(db, user, form_id)

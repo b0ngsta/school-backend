@@ -78,10 +78,10 @@ def test_class_teacher_and_managers_review_a_parents_form(client, school, kids):
     _ok(client.put(f"/fee-claim-forms/{form['id']}/accept", headers=bearer(school.admin), json={}), 409)
     told = _notes(client, kids[1])
     assert told and told[0]["title"].startswith("Fee claim declined")
-    assert told[0]["data"]["route"] == "FeeClaimForm"
+    assert told[0]["data"]["route"] == "Fees"  # the claim form lives on the Fees screen
     mine = _ok(client.get(f"/student/fee-claims/{form['id']}", headers=bearer(kids[1])))
     assert mine["status"] == "declined"
-    assert _ok(client.get("/updates", headers=bearer(kids[1])))["sections"]["fee_claim_forms"]["latest_at"]
+    assert _ok(client.get("/updates", headers=bearer(kids[1])))["sections"]["fees"]["latest_at"]
 
     # a fresh form, accepted by a manager (no fee linked: nothing else changes)
     again = _ok(_send(client, kids[1], purpose="Term 2 tuition", amount="2000"), 201)
