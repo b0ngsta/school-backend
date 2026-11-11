@@ -18,8 +18,10 @@ from app.models.auth import CurrentUser
 from app.models.school import SchoolProfileUpdate
 from app.services import audit, storage
 
+# the school's theme (migration 0022): "#RRGGBB" or NULL = the apps' own colour
+THEME_FIELDS = ("theme_color", "header_color", "button_color")
 PROFILE_FIELDS = ("director_name", "principal_name", "affiliation_no", "phone", "tel", "email",
-                  "website", "address", "session_start_month")
+                  "website", "address", "session_start_month", *THEME_FIELDS)
 _SELECT = "SELECT id, code, name, logo_path, " + ", ".join(PROFILE_FIELDS) + " FROM organisations WHERE id = %s"
 
 
@@ -43,6 +45,12 @@ def current_session(db: Db, org_id: int | None = None) -> dict:
                       (org_id if org_id is not None else db.org,))
     start, end = session_bounds(int(month or 4))
     return {"label": session_label(start, end), "start": start, "end": end}
+
+
+def theme(db: Db, org_id: int) -> dict:
+    """The school's colours, sent with every token response so each user's app wears them."""
+    row = db.one("SELECT " + ", ".join(THEME_FIELDS) + " FROM organisations WHERE id = %s", (org_id,))
+    return row or dict.fromkeys(THEME_FIELDS)
 
 
 def get_profile(db: Db, org_id: int | None = None) -> dict:

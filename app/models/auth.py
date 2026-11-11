@@ -52,6 +52,10 @@ class TokenResponse(BaseModel):
     # per-school feature flags (migration 0019): {"fees": true, "transport": false, …};
     # clients treat a missing map / key as ON (older server)
     features: dict[str, bool] | None = None
+    # the school's theme (migration 0022): "#RRGGBB" or null = the app's own colour
+    theme_color: str | None = None
+    header_color: str | None = None
+    button_color: str | None = None
 
 
 LoginResponse = TokenResponse

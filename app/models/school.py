@@ -1,6 +1,10 @@
+import re
+
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.validators import clean_email
+
+_HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
 def _blank_to_none(value: str | None) -> str | None:
@@ -24,11 +28,25 @@ class SchoolProfileUpdate(BaseModel):
     address: str | None = Field(default=None, max_length=300)
     session_start_month: int | None = Field(default=None, ge=1, le=12,
                                             description="Month the academic session starts (4 = April)")
+    # the school's theme (migration 0022): "#RRGGBB"; an empty string = back to the apps' own colour
+    theme_color: str | None = Field(default=None, max_length=7, description="Main colour")
+    header_color: str | None = Field(default=None, max_length=7, description="Header colour (empty = main colour)")
+    button_color: str | None = Field(default=None, max_length=7, description="Button colour (empty = main colour)")
 
     @field_validator("director_name", "principal_name", "affiliation_no", "phone", "tel", "website", "address")
     @classmethod
     def _trim(cls, value: str | None) -> str | None:
         return _blank_to_none(value)
+
+    @field_validator("theme_color", "header_color", "button_color")
+    @classmethod
+    def _color(cls, value: str | None) -> str | None:
+        value = _blank_to_none(value)
+        if value is None:
+            return None
+        if not _HEX_COLOR.match(value):
+            raise ValueError("Enter the colour as # and six characters, e.g. #2B4C7E")
+        return value.upper()
 
     @field_validator("email")
     @classmethod

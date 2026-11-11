@@ -151,6 +151,8 @@ class Filled:
                    files={"file": ("c.pdf", PDF_BYTES, "application/pdf")}))
         self.school_event = post("/events", {"title": f"{mark} Annual Day", "start_date": str(school_today())})["id"]
         _ok(c.post(f"/events/{self.school_event}/videos", headers=a, json={"url": f"https://v.example/{mark}"}), 201)
+        self.gallery_photo = _ok(c.post("/gallery", headers=a, data={"caption": f"{mark} sports day"},
+                                        files={"file": ("g.png", _png(), "image/png")}), 201)["id"]
         _ok(c.put(f"/vehicles/{self.vehicle}/students/{self.student}", headers=a,
                   json={"stop_name": f"{mark} Stop", "pickup_time": "07:30"}))
 
@@ -464,6 +466,7 @@ def test_ids_from_another_school_are_not_found(client, schools):
         c.put(f"/events/{a.school_event}", headers=h, json={"title": "x", "start_date": str(school_today())}),
         c.delete(f"/events/{a.school_event}", headers=h),
         c.post(f"/events/{a.school_event}/videos", headers=h, json={"url": "https://x.example"}),
+        c.delete(f"/gallery/{a.gallery_photo}", headers=h),
         c.get(f"/vehicles/{a.vehicle}/students", headers=h),
         c.put(f"/vehicles/{a.vehicle}/students/{b.student}", headers=h, json={}),
         c.put(f"/vehicles/{b.vehicle}/students/{a.student}", headers=h, json={}),

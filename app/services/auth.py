@@ -22,7 +22,16 @@ from app.core.context import client_ip, device_id
 from app.core.errors import BadRequest, Forbidden, Unauthorized
 from app.db import Db
 from app.models.auth import CurrentUser, TokenResponse
-from app.services import audit, captcha, features, login_throttle, notifications, organisations, sessions
+from app.services import (
+    audit,
+    captcha,
+    features,
+    login_throttle,
+    notifications,
+    organisations,
+    school_profile,
+    sessions,
+)
 
 INVALID_CREDENTIALS = "Invalid username or password"
 INVALID_TOKEN = "Invalid or expired token"
@@ -53,6 +62,7 @@ def token_response(user: dict, session: sessions.IssuedSession, db: Db | None = 
         org_code=user["org_code"],
         org_name=user["org_name"],
         features=dict(features.for_org(db, user["org_id"])) if db is not None else None,
+        **(school_profile.theme(db, user["org_id"]) if db is not None else {}),
     )
 
 
