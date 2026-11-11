@@ -319,6 +319,11 @@ def test_every_list_shows_only_the_own_school(client, schools):
             "/student/syllabus/full", "/student/performance",
             f"/student/attendance/month?year={school_today().year}&month={school_today().month}",
             f"/student/homework?subject={me.mark} Maths&date={school_today()}",
+            # Nov 2026 requests (migration 0021)
+            f"/attendance/history?section_id={me.sec}", f"/users/teachers/{me.teacher}",
+            f"/fees/students/{me.student}/history", f"/fees/class-plan?class_id={me.cls}",
+            f"/exam-format?class_id={me.cls}", f"/final-results?section_id={me.sec}",
+            f"/students/{me.student}/exam-results", "/student/final-result",
         ]
         seen_own = 0
         for role in (me.admin, me.t, me.s):
@@ -366,6 +371,24 @@ def test_ids_from_another_school_are_not_found(client, schools):
         c.post("/fees", headers=h, json={"student_id": a.student, "title": "x", "amount": 1}),
         c.post("/fees/generate", headers=h, json={"class_id": a.cls, "title": "x"}),
         c.put(f"/fees/{a.fee}/pay", headers=h, json={"method": "cash"}),
+        # Nov 2026 requests (migration 0021)
+        c.put(f"/fees/{a.fee}/unpay", headers=h, json={}),
+        c.get(f"/fees/students/{a.student}/history", headers=h),
+        c.get(f"/fees/class-plan?class_id={a.cls}", headers=h),
+        c.post("/fees/generate", headers=h, json={"class_id": a.cls, "title": "x", "amount": 1}),
+        c.put(f"/classes/{a.cls}", headers=h, json={"fee_amount": 1}),
+        c.put(f"/users/{a.teacher}/password", headers=h, json={"new_password": "hijacked1"}),
+        c.get(f"/users/teachers/{a.teacher}", headers=h),
+        c.get(f"/attendance/history?section_id={a.sec}", headers=h),
+        c.put(f"/fee-claim-forms/{a.claim_form}", headers=h, json={"amount": 1}),
+        c.get(f"/exam-format?class_id={a.cls}", headers=h),
+        c.put("/exam-format", headers=h, json={"class_id": a.cls, "parts": [{"name": "x", "max_marks": 5}]}),
+        c.put("/exam-format", headers=h, json={"class_id": b.cls, "parts": [{"exam_id": a.exam, "max_marks": 5}]}),
+        c.post("/exam-format/copy", headers=h, json={"from_class_id": a.cls, "to_class_ids": [b.cls]}),
+        c.get(f"/final-results?section_id={a.sec}", headers=h),
+        c.get(f"/final-results/template?section_id={a.sec}", headers=h),
+        c.put("/final-results/publish", headers=h, json={"section_id": a.sec}),
+        c.get(f"/students/{a.student}/exam-results", headers=h),
         c.delete(f"/fees/{a.fee}", headers=h),
         c.put(f"/fees/claims/{a.claim}/approve", headers=h, json={}),
         c.put(f"/fee-claim-forms/{a.claim_form}/accept", headers=h, json={}),

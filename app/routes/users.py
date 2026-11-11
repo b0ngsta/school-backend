@@ -8,7 +8,7 @@ from app.core.roles import MANAGERS, STAFF
 from app.db import Db
 from app.dependencies import get_db, page_params, paged, require_roles
 from app.models.auth import CurrentUser
-from app.models.users import StaffCreate, StaffUpdate, TeacherInfoUpdate
+from app.models.users import PasswordSet, StaffCreate, StaffUpdate, TeacherInfoUpdate
 from app.services import leaving
 from app.services import users as user_service
 from app.services.pagination import Page
@@ -44,6 +44,13 @@ def update_staff(user_id: int, body: StaffUpdate, actor: CurrentUser = Depends(m
     return user_service.update_staff(db, actor, user_id, body)
 
 
+@router.put("/{user_id}/password")
+def set_password(user_id: int, body: PasswordSet, actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
+    """The office sets a new password for a staff or student account (admin /
+    principal / sub-admin accounts: admin only). The person is signed out everywhere."""
+    return user_service.set_password(db, actor, user_id, body)
+
+
 @router.delete("/{user_id}")
 def delete_user(user_id: int, reason: str | None = ReasonQuery, actor: CurrentUser = Depends(manager),
                 db: Db = Depends(get_db)):
@@ -72,6 +79,12 @@ def upload_photo(
 @router.get("/teachers")
 def list_teachers(actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
     return user_service.list_teachers(db)
+
+
+@router.get("/teachers/{user_id}")
+def get_teacher(user_id: int, actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
+    """One teacher: account, details and class assignments (the teacher's profile page)."""
+    return user_service.get_teacher(db, user_id)
 
 
 @router.put("/teachers/{user_id}")

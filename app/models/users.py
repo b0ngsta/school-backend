@@ -40,6 +40,14 @@ class StaffCreate(BaseModel):
         return self
 
 
+class PasswordSet(BaseModel):
+    """PUT /users/{id}/password: the office gives an account a new password."""
+
+    new_password: str = Field(min_length=6, max_length=PASSWORD_MAX_LENGTH)
+    must_change_password: bool = Field(
+        default=True, description="Make the user choose their own password at the next sign-in")
+
+
 class StaffUpdate(BaseModel):
     """PUT /users/{id}: fields left out of the request keep their value."""
 

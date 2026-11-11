@@ -42,3 +42,50 @@ class ResultsSave(BaseModel):
     # maximum for these marks; leave out to use the exam's max_marks (no maximum if neither is set)
     max_marks: float | None = Field(default=None, gt=0, lt=MARKS_LIMIT)
     results: list[ResultEntry]
+
+
+# ---------------------------------------------------------------- exam format / grading / final result (0021)
+
+class FormatPart(BaseModel):
+    """One exam of a class's final result. `exam_id` = an exam that already
+    exists (kept; only the class's own exams are renamed / re-dated); without
+    it a new exam is created for the class."""
+
+    exam_id: int | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=150)
+    max_marks: float = Field(gt=0, lt=MARKS_LIMIT, description="Marks this exam carries in the final result, e.g. 20")
+    start_date: date | None = None
+    end_date: date | None = None
+
+    @model_validator(mode="after")
+    def check(self):
+        if self.exam_id is None and not (self.name or "").strip():
+            raise ValueError("Give the exam a name")
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValueError("end_date must be on/after start_date")
+        return self
+
+
+class FormatSave(BaseModel):
+    class_id: int
+    parts: list[FormatPart] = Field(max_length=15)
+
+
+class FormatCopy(BaseModel):
+    from_class_id: int
+    to_class_ids: list[int] = Field(min_length=1, max_length=60)
+
+
+class GradeBand(BaseModel):
+    grade: str = Field(min_length=1, max_length=10)
+    min_percent: float = Field(ge=0, le=100)
+    max_percent: float = Field(ge=0, le=100)
+
+
+class GradingUpdate(BaseModel):
+    bands: list[GradeBand] = Field(default_factory=list)
+
+
+class FinalPublish(BaseModel):
+    section_id: int
+    published: bool = True

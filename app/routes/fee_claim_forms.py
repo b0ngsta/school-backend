@@ -14,8 +14,14 @@ Reviewers (class teacher of the form's section, or MANAGERS; drivers / subject t
 - GET  /fee-claim-forms?status_filter=&section_id=   pending first (paged)
 - GET  /fee-claim-forms/stats              {pending, accepted, declined, total, can_review, sections}
 - GET  /fee-claim-forms/{id}
+- PUT  /fee-claim-forms/{id}               {amount?, paid_on?, method?, reference_no?, purpose?} correct the details
 - PUT  /fee-claim-forms/{id}/accept        {note?, mark_fee_paid?: true}
 - PUT  /fee-claim-forms/{id}/decline       {note?}
+
+Two steps (migration 0021): a class teacher's accept / decline is a first check
+they can still change; a manager's is the office validation — final, and the
+only one that marks a linked fee paid. `status_filter=to_validate` = checked by
+a teacher, waiting for the office; stats carry `to_validate`.
 """
 from datetime import date
 
@@ -26,7 +32,7 @@ from app.db import Db
 from app.dependencies import get_db, page_params, paged, require_feature, require_roles
 from app.models.auth import CurrentUser
 from app.models.common import PaymentMethod
-from app.models.fee_claim_forms import FeeClaimFormAccept, FeeClaimFormDecline
+from app.models.fee_claim_forms import FeeClaimFormAccept, FeeClaimFormDecline, FeeClaimFormEdit
 from app.services import fee_claim_forms as service
 from app.services.pagination import Page
 
@@ -87,6 +93,13 @@ def form_stats(user: CurrentUser = Depends(reviewer), db: Db = Depends(get_db)):
 @router.get("/fee-claim-forms/{form_id}")
 def get_form(form_id: int, user: CurrentUser = Depends(reviewer), db: Db = Depends(get_db)):
     return service.get_staff(db, user, form_id)
+
+
+@router.put("/fee-claim-forms/{form_id}")
+def edit_form(form_id: int, body: FeeClaimFormEdit, user: CurrentUser = Depends(reviewer),
+              db: Db = Depends(get_db)):
+    """Correct the parent's details (until the office has validated the form)."""
+    return service.edit(db, user, form_id, body)
 
 
 @router.put("/fee-claim-forms/{form_id}/accept")

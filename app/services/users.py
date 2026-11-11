@@ -8,8 +8,9 @@ from app.core.roles import ADMIN_MANAGED, MANAGERS
 from app.core.security import hash_password
 from app.db import Db
 from app.models.auth import CurrentUser
-from app.models.users import StaffCreate, StaffUpdate, TeacherInfoUpdate
+from app.models.users import PasswordSet, StaffCreate, StaffUpdate, TeacherInfoUpdate
 from app.services import access, audit, leaving, pagination, storage
+from app.services import auth as auth_service
 
 ONLY_ADMIN_CREATES = "Only admin can create admin/principal/sub-admin accounts"
 
@@ -138,6 +139,46 @@ def list_teachers(db: Db) -> list[dict]:
         "WHERE u.org_id = %s AND u.user_type = 'teacher' AND u.left_on IS NULL ORDER BY u.full_name",
         (db.org,),
     )
+
+
+def set_password(db: Db, actor: CurrentUser, user_id: int, body: PasswordSet) -> dict:
+    """A manager gives another account (staff or student) a new password, e.g.
+    for a parent who forgot it. Admin / principal / sub-admin accounts: admin
+    only (like creating and editing them). Every session of the person ends;
+    by default they must choose their own password at the next sign-in."""
+    with db.transaction():
+        target = db.one("SELECT id, username, user_type, left_on FROM users WHERE id = %s AND org_id = %s "
+                        "FOR UPDATE", (user_id, db.org))
+        if not target:
+            raise NotFound("User not found")
+        if target["id"] == actor.id:
+            raise BadRequest("To change your own password use My account → Change password")
+        if target["user_type"] in ADMIN_MANAGED and actor.user_type != "admin":
+            raise Forbidden("Only admin can change this account's password")
+        if target["left_on"]:
+            raise Conflict("This account is marked as left. Reactivate it before setting a password.")
+        auth_service.set_password(db, user_id, body.new_password, reason="password_set_by_office")
+        if body.must_change_password:
+            db.execute("UPDATE users SET must_change_password = 1 WHERE id = %s", (user_id,))
+        audit.record(db, actor, "user.password_set", "user", user_id,
+                     {"username": target["username"], "user_type": target["user_type"],
+                      "must_change_password": body.must_change_password})
+    return {"id": user_id, "username": target["username"], "must_change_password": body.must_change_password,
+            "sessions_revoked": True}
+
+
+def get_teacher(db: Db, user_id: int) -> dict:
+    """One teacher's account, details and class assignments."""
+    row = db.one(
+        "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.photo_path, u.user_type, u.is_active, u.left_on, "
+        "u.left_reason, u.created_at, t.designation, t.subject, t.qualification, t.joining_date, t.address, "
+        "(SELECT COUNT(*) FROM lesson_plans lp WHERE lp.teacher_id = u.id) AS lesson_plan_count "
+        "FROM users u LEFT JOIN teacher_profiles t ON t.user_id = u.id "
+        "WHERE u.id = %s AND u.org_id = %s AND u.user_type = 'teacher'", (user_id, db.org))
+    if not row:
+        raise NotFound("Teacher not found")
+    row["assignments"] = access.get_assignments(db, user_id)
+    return row
 
 
 def update_teacher_info(db: Db, user_id: int, body: TeacherInfoUpdate) -> dict:

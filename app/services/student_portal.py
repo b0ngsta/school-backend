@@ -10,7 +10,7 @@ from datetime import date
 
 from app.core.errors import NotFound
 from app.db import Db
-from app.services import documents, pagination
+from app.services import documents, grading, pagination
 from app.services import homework as class_homework
 from app.services import notices as notice_service
 from app.services.calendar import get_calendar_payload
@@ -203,6 +203,7 @@ def exams(db: Db, uid: int) -> list[dict]:
         (uid, db.org, me["class_id"]),
     )
     published = [e["id"] for e in rows if e["results_published"]]
+    own_grade = grading.custom_grader(db) if published else None
     by_exam: dict[int, list[dict]] = {}
     if published:
         for r in db.all(
@@ -222,6 +223,9 @@ def exams(db: Db, uid: int) -> list[dict]:
         for sub in subjects:
             if sub["max_marks"] is None:
                 sub["max_marks"] = exam_max
+            # a school with its own grading system (0021): grade from the marks when none was typed
+            if own_grade and not sub["grade"] and sub["marks"] is not None and sub["max_marks"]:
+                sub["grade"] = own_grade(round(float(sub["marks"]) * 100 / float(sub["max_marks"]), 1))
         e["subjects"] = subjects
         marked = [sub for sub in subjects if sub["marks"] is not None]
         e["total"] = sum(float(sub["marks"]) for sub in marked) if marked else None

@@ -20,7 +20,7 @@ from app.models.students import (
     StudentCreate,
     StudentUpdate,
 )
-from app.services import leaving
+from app.services import final_results, leaving
 from app.services import students as student_service
 from app.services.pagination import Page
 
@@ -83,6 +83,15 @@ def reactivate_student(student_id: int, user: CurrentUser = Depends(manager), db
 @router.get("/{student_id}/attendance", dependencies=[Depends(require_feature("attendance"))])
 def student_attendance(student_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
     return student_service.attendance_history(db, user, student_id)
+
+
+# ================= exam results =================
+
+@router.get("/{student_id}/exam-results")
+def student_exam_results(student_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """Every exam the student has marks in + the session's final result
+    (managers, or teachers assigned to the student's section)."""
+    return final_results.student_results(db, user, student_id)
 
 
 # ================= homework =================

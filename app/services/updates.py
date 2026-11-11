@@ -98,11 +98,14 @@ def _student(db: Db, uid: int) -> dict:
         "(SELECT MAX(fc.reviewed_at) FROM fee_claims fc WHERE fc.student_id = %(uid)s AND fc.org_id = %(org)s) "
         "  AS fee_claims, "
         # fee claim forms (0020): one of yours was accepted / declined
-        "(SELECT MAX(ff.reviewed_at) FROM fee_claim_forms ff WHERE ff.student_id = %(uid)s "
+        "(SELECT MAX(COALESCE(ff.validated_at, ff.reviewed_at)) FROM fee_claim_forms ff WHERE ff.student_id = %(uid)s "
         "  AND ff.org_id = %(org)s) AS fee_claim_forms, "
         "(SELECT MAX(r.updated_at) FROM exam_results r JOIN exams e ON e.id = r.exam_id "
         "  WHERE r.student_id = %(uid)s AND e.org_id = %(org)s AND e.results_published = 1) AS exams, "
         "(SELECT MAX(rc.created_at) FROM report_cards rc WHERE rc.student_id = %(uid)s) AS report_cards, "
+        # the session's final result was published for the child's section (0021)
+        "(SELECT MAX(fr.published_at) FROM final_results fr JOIN student_profiles sp ON sp.section_id = fr.section_id "
+        "  WHERE sp.user_id = %(uid)s AND fr.org_id = %(org)s) AS final_result, "
         "(SELECT MAX(ho.created_at) FROM holidays ho WHERE ho.org_id = %(org)s) AS holidays, "
         "(SELECT MAX(st.updated_at) FROM student_transport st WHERE st.student_id = %(uid)s "
         "  AND st.org_id = %(org)s) AS transport",
@@ -119,7 +122,7 @@ def _student(db: Db, uid: int) -> dict:
         "attendance": row["attendance"],
         # the parent's Fees screen also holds the fee claim forms (0020): a reviewed one lights it
         "fees": _newest(row["fees"], row["fee_claims"], row["fee_claim_forms"]),
-        "exams": row["exams"],
+        "exams": _newest(row["exams"], row["final_result"]),
         # the Performance Report screen (Nov 2026) is built from published results too
         "report_cards": _newest(row["report_cards"], row["exams"]),
         "holidays": row["holidays"],
@@ -169,8 +172,12 @@ def _staff(db: Db, user: CurrentUser) -> dict:
         "(SELECT MAX(fc.created_at) FROM fee_claims fc WHERE fc.org_id = %(org)s AND fc.status = 'pending') "
         "  AS fee_claims, "
         # fee claim forms waiting (0020): managers every one · teachers the sections they are class teacher of
-        "(SELECT MAX(ff.created_at) FROM fee_claim_forms ff WHERE ff.org_id = %(org)s AND ff.status = 'pending'"
-        + ("" if manager else
+        # (0021) managers also: checked by a class teacher, waiting for the office to validate
+        + ("(SELECT MAX(CASE WHEN ff.status = 'pending' THEN ff.created_at ELSE ff.reviewed_at END) "
+           "FROM fee_claim_forms ff WHERE ff.org_id = %(org)s AND (ff.status = 'pending' "
+           "OR (ff.status IN ('accepted', 'declined') AND ff.validated_at IS NULL))"
+           if manager else
+           "(SELECT MAX(ff.created_at) FROM fee_claim_forms ff WHERE ff.org_id = %(org)s AND ff.status = 'pending'"
            " AND ff.section_id IN (SELECT ta.section_id FROM teacher_assignments ta WHERE ta.org_id = %(org)s "
            "AND ta.teacher_id = %(uid)s AND ta.role = 'class_teacher')")
         + ") AS fee_claim_forms",

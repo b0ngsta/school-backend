@@ -9,7 +9,7 @@ from app.core.errors import BadRequest, NotFound
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.sms import SmsCreate
-from app.services import pagination
+from app.services import labels, pagination
 
 
 def _send_sms(numbers: list[str], message: str) -> bool:
@@ -49,7 +49,7 @@ def _resolve_recipients(db: Db, group: str) -> tuple[str, list[str]]:
         )
         if not sec:
             raise NotFound("Section not found")
-        label = f"{sec['class_name']} — {sec['section_name']} Parents"
+        label = f"{labels.class_section(sec['class_name'], sec['section_name'])} Parents"
         return label, _phones(db.all(
             "SELECT COALESCE(sp.guardian_phone, u.phone) AS phone "
             "FROM student_profiles sp JOIN users u ON u.id = sp.user_id "

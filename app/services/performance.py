@@ -50,19 +50,25 @@ def _avg(values) -> float | None:
     return round(sum(values) / len(values), 1) if values else None
 
 
-def _empty(session: dict) -> dict:
-    return {"session": session, "grades": [{"min": f, "grade": g} for f, g in GRADES],
+def _empty(session: dict, grades: list[dict] | None = None) -> dict:
+    return {"session": session,
+            "grades": grades if grades is not None else [{"min": f, "grade": g} for f, g in GRADES],
             "overall": None, "exams": [], "subjects": [], "insights": []}
 
 
 def report(db: Db, uid: int) -> dict:
+    from app.services import grading  # (imports this module's default scale)
+
     sess = school_profile.current_session(db)
     session = {"label": sess["label"], "start": sess["start"], "end": sess["end"]}
+    # the school's own grading system (migration 0021) replaces the default scale when it has one
+    grade_for = grading.custom_grader(db) or grade_of
+    grades = grading.floors(db) if grade_for is not grade_of else None
     me = db.one("SELECT class_id, section_id FROM student_profiles WHERE user_id = %s AND org_id = %s",
                 (uid, db.org)) or {}
     class_id = me.get("class_id")
     if not class_id:
-        return _empty(session)
+        return _empty(session, grades)
     exams = db.all(
         "SELECT id, name, start_date, end_date, max_marks FROM exams "
         "WHERE org_id = %s AND (class_id = %s OR class_id IS NULL) AND results_published = 1 "
@@ -70,7 +76,7 @@ def report(db: Db, uid: int) -> dict:
         (db.org, class_id, sess["start"], sess["end"]),
     )
     if not exams:
-        return _empty(session)
+        return _empty(session, grades)
     exam_ids = [e["id"] for e in exams]
     exam_max = {e["id"]: (float(e["max_marks"]) if e["max_marks"] is not None else None) for e in exams}
     rows = db.all(
@@ -123,7 +129,7 @@ def report(db: Db, uid: int) -> dict:
     overall_pct = {sid: _pct(g, t) for sid, (g, t) in overall_tot.items() if t}
     mine = overall_tot.get(uid)
     if not mine:
-        return _empty(session)
+        return _empty(session, grades)
 
     # ---- exams (chronological)
     out_exams = []
@@ -134,7 +140,7 @@ def report(db: Db, uid: int) -> dict:
         got, top = exam_tot[(uid, e["id"])]
         out_exams.append({
             "id": e["id"], "name": e["name"], "start_date": e["start_date"], "end_date": e["end_date"],
-            "obtained": got, "max_total": top, "percentage": scores[uid], "grade": grade_of(scores[uid]),
+            "obtained": got, "max_total": top, "percentage": scores[uid], "grade": grade_for(scores[uid]),
             "class_average": _avg(scores.values()), "class_highest": max(scores.values()),
             "rank": _rank(scores, uid), "class_size": len(scores),
         })
@@ -159,14 +165,14 @@ def report(db: Db, uid: int) -> dict:
             g, t, absent, raw, grade = c
             class_e = [_pct(cg, ct) for (sid, eid, s), (cg, ct, *_r) in cells.items() if eid == e["id"] and s == sub]
             history.append({"exam_id": e["id"], "exam": e["name"], "marks": raw, "max_marks": t,
-                            "absent": absent, "percentage": _pct(g, t), "grade": grade or grade_of(_pct(g, t)),
+                            "absent": absent, "percentage": _pct(g, t), "grade": grade or grade_for(_pct(g, t)),
                             "class_average": _avg(class_e)})
         trend = (round(history[-1]["percentage"] - history[0]["percentage"], 1)
                  if len(history) >= 2 and history[-1]["percentage"] is not None
                  and history[0]["percentage"] is not None else None)
         avg = _avg(scores.values())
         out_subjects.append({
-            "subject": sub, "obtained": got, "max_total": top, "percentage": pct, "grade": grade_of(pct),
+            "subject": sub, "obtained": got, "max_total": top, "percentage": pct, "grade": grade_for(pct),
             "class_average": avg, "class_highest": max(scores.values()) if scores else None,
             "vs_class": round(pct - avg, 1) if pct is not None and avg is not None else None,
             "rank": _rank(scores, uid), "class_size": len(scores), "trend": trend, "exams": history,
@@ -175,12 +181,12 @@ def report(db: Db, uid: int) -> dict:
     pct = overall_pct[uid]
     class_avg = _avg(overall_pct.values())
     overall = {
-        "obtained": mine[0], "max_total": mine[1], "percentage": pct, "grade": grade_of(pct),
+        "obtained": mine[0], "max_total": mine[1], "percentage": pct, "grade": grade_for(pct),
         "rank": _rank(overall_pct, uid), "class_size": len(overall_pct), "class_average": class_avg,
         "vs_class": round(pct - class_avg, 1) if pct is not None and class_avg is not None else None,
         "exams_count": len(out_exams), "subjects_count": len(out_subjects),
     }
-    return {**_empty(session), "overall": overall, "exams": out_exams, "subjects": out_subjects,
+    return {**_empty(session, grades), "overall": overall, "exams": out_exams, "subjects": out_subjects,
             "insights": _insights(overall, out_subjects, out_exams)}
 
 

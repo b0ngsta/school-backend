@@ -5,7 +5,7 @@ from app.core.roles import MANAGERS, STAFF
 from app.db import Db
 from app.dependencies import get_db, require_roles
 from app.models.auth import CurrentUser
-from app.models.classes import ClassCreate, SectionCreate, SubjectsUpdate
+from app.models.classes import ClassCreate, ClassUpdate, SectionCreate, SubjectsUpdate
 from app.services import classes as class_service
 
 router = APIRouter(prefix="/classes", tags=["classes"])
@@ -17,6 +17,12 @@ staff = require_roles(*STAFF)
 @router.post("", status_code=201)
 def create_class(body: ClassCreate, actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
     return class_service.create_class(db, body)
+
+
+@router.put("/{class_id}")
+def update_class(class_id: int, body: ClassUpdate, actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
+    """Rename a class and / or change its fee for the year (fields left out keep their value)."""
+    return class_service.update_class(db, actor, class_id, body)
 
 
 @router.put("/{class_id}/subjects")

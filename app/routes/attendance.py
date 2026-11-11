@@ -5,7 +5,7 @@ mark: managers + the section's CLASS teacher
 """
 from datetime import date
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.core.roles import STAFF
 from app.db import Db
@@ -24,6 +24,13 @@ staff = require_roles(*STAFF)
 def attendance_stats(day: date | None = None, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
     """School-wide numbers for a day (default today)."""
     return attendance_service.stats(db, day)
+
+
+@router.get("/history")
+def attendance_history(section_id: int, days: int = Query(30, ge=1, le=120),
+                       user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """The section's marked days (newest first) with present / absent / leave / half-day counts."""
+    return attendance_service.history(db, user, section_id, days)
 
 
 @router.get("")

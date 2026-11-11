@@ -1,11 +1,11 @@
 """Classes, sections and class subjects."""
 from __future__ import annotations
 
-from app.core.errors import Conflict, DuplicateKey, NotFound
+from app.core.errors import BadRequest, Conflict, DuplicateKey, NotFound
 from app.db import Db
 from app.models.auth import CurrentUser
-from app.models.classes import ClassCreate, SectionCreate, SubjectsUpdate
-from app.services import audit, storage
+from app.models.classes import ClassCreate, ClassUpdate, SectionCreate, SubjectsUpdate
+from app.services import audit, school_profile, storage
 
 
 def _clean_subjects(subjects: list[str]) -> list[str]:
@@ -27,20 +27,81 @@ def _set_subjects(db: Db, class_id: int, subjects: list[str]) -> None:
     )
 
 
+WHOLE_CLASS = ""  # sections.name of the one section of a class that has no sections (0021)
+
+
+def section_names(count: int) -> list[str]:
+    """4 → A, B, C, D."""
+    return [chr(ord("A") + i) for i in range(count)]
+
+
 def create_class(db: Db, body: ClassCreate) -> dict:
+    """`sections`: N → sections A… are created with the class; 0 → a class
+    that is not split into sections: it gets ONE section with an empty name,
+    so attendance, class teacher, timetable… work as for any section, and
+    `has_sections = 0` tells clients not to show a section; left out → no
+    sections yet (as before; add them one by one)."""
     with db.transaction():
         if db.one("SELECT id FROM classes WHERE org_id = %s AND name = %s", (db.org, body.name)):
             raise Conflict("Class already exists")
+        whole = body.sections == 0
         try:
             class_id = db.execute(
-                "INSERT INTO classes (org_id, name, fee_amount) VALUES (%s, %s, %s)",
-                (db.org, body.name, body.fee_amount),
+                "INSERT INTO classes (org_id, name, fee_amount, has_sections) VALUES (%s, %s, %s, %s)",
+                (db.org, body.name, body.fee_amount, 0 if whole else 1),
             ).lastrowid
         except DuplicateKey:
             raise Conflict("Class already exists") from None
         if body.subjects:
             _set_subjects(db, class_id, body.subjects)
-    return {"id": class_id, "name": body.name}
+        names = [WHOLE_CLASS] if whole else section_names(body.sections or 0)
+        sections = [{"id": db.execute("INSERT INTO sections (org_id, class_id, name) VALUES (%s, %s, %s)",
+                                      (db.org, class_id, name)).lastrowid, "name": name} for name in names]
+    return {"id": class_id, "name": body.name, "has_sections": 0 if whole else 1, "sections": sections}
+
+
+def update_class(db: Db, actor: CurrentUser | None, class_id: int, body: ClassUpdate) -> dict:
+    """Rename a class and / or change its fee for the year. The fee can't go
+    below what is already billed to the class in parts this session (take a
+    part back on the Fees page first)."""
+    changes = body.model_dump(exclude_unset=True)
+    with db.transaction():
+        cls = db.one("SELECT id, name, fee_amount FROM classes WHERE id = %s AND org_id = %s FOR UPDATE",
+                     (class_id, db.org))
+        if not cls:
+            raise NotFound("Class not found")
+        new: dict = {}
+        name = (changes.get("name") or "").strip()
+        if name and name != cls["name"]:
+            if db.one("SELECT id FROM classes WHERE org_id = %s AND name = %s AND id <> %s",
+                      (db.org, name, class_id)):
+                raise Conflict("Class already exists")
+            new["name"] = name
+        if "fee_amount" in changes:
+            fee = changes["fee_amount"]
+            fee = round(float(fee), 2) if fee else None
+            old = round(float(cls["fee_amount"]), 2) if cls["fee_amount"] else None
+            if fee != old:
+                session = school_profile.current_session(db)["label"]
+                billed = round(float(db.scalar(
+                    "SELECT COALESCE(SUM(amount), 0) FROM class_fee_installments "
+                    "WHERE org_id = %s AND class_id = %s AND session = %s", (db.org, class_id, session)) or 0), 2)
+                if billed > (fee or 0) + 0.004:
+                    raise BadRequest(
+                        f"₹{billed:,.0f} of {cls['name']}'s fee is already billed for {session}, "
+                        "so the fee can't be less than that.",
+                        extra={"code": "below_billed", "allotted": billed})
+                new["fee_amount"] = fee
+        if new:
+            try:
+                db.execute(f"UPDATE classes SET {', '.join(f'{k} = %s' for k in new)} WHERE id = %s",
+                           (*new.values(), class_id))
+            except DuplicateKey:
+                raise Conflict("Class already exists") from None
+            audit.record(db, actor, "class.update", "class", class_id,
+                         {"before": {k: cls[k] for k in new}, "after": new})
+        row = db.one("SELECT id, name, fee_amount, has_sections FROM classes WHERE id = %s", (class_id,))
+    return row
 
 
 def update_subjects(db: Db, class_id: int, body: SubjectsUpdate) -> dict:
@@ -167,8 +228,19 @@ def delete_class(db: Db, actor: CurrentUser | None, class_id: int) -> dict:
 
 def create_section(db: Db, class_id: int, body: SectionCreate) -> dict:
     with db.transaction():
-        if not db.one("SELECT id FROM classes WHERE id = %s AND org_id = %s", (class_id, db.org)):
+        cls = db.one("SELECT id, has_sections FROM classes WHERE id = %s AND org_id = %s FOR UPDATE",
+                     (class_id, db.org))
+        if not cls:
             raise NotFound("Class not found")
+        if not cls["has_sections"]:
+            # the class was one group so far: that group (students, class teacher, attendance…)
+            # becomes the first named section; more sections can then be added as usual
+            whole = db.one("SELECT id FROM sections WHERE class_id = %s AND name = %s FOR UPDATE",
+                           (class_id, WHOLE_CLASS))
+            db.execute("UPDATE classes SET has_sections = 1 WHERE id = %s", (class_id,))
+            if whole:
+                db.execute("UPDATE sections SET name = %s WHERE id = %s", (body.name, whole["id"]))
+                return {"id": whole["id"], "class_id": class_id, "name": body.name, "renamed": True}
         if db.one("SELECT id FROM sections WHERE class_id = %s AND name = %s", (class_id, body.name)):
             raise Conflict("Section already exists")
         try:
@@ -189,6 +261,8 @@ def delete_section(db: Db, actor: CurrentUser | None, class_id: int, section_id:
         )
         if not section:
             raise NotFound("Section not found")
+        if section["name"] == WHOLE_CLASS:
+            raise BadRequest(f"{section['class_name']} has no sections — delete the class itself instead.")
         _refuse(f"Section {section['name']}", _section_records(db, [section_id]),
                 "A section with records stays; move its students to another section if it is no longer used.")
         students = db.scalar("SELECT COUNT(*) FROM student_profiles WHERE section_id = %s", (section_id,))

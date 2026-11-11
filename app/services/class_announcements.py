@@ -15,7 +15,7 @@ from app.core.roles import MANAGERS
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.class_announcements import ClassAnnouncementCreate, ClassAnnouncementUpdate
-from app.services import attachments, audit, notify, pagination, storage
+from app.services import attachments, audit, labels, notify, pagination, storage
 
 ORDER = "a.created_at DESC, a.id DESC"
 _COLUMNS = ("a.id, a.title, a.body, a.audience_label, a.attachment_path, a.attachment_name, a.attachment_type, "
@@ -65,7 +65,7 @@ def targets(db: Db, user: CurrentUser) -> list[dict]:
             "GROUP BY c.id, c.name, s.id, s.name ORDER BY c.name, s.name", (db.org, user.id))
     for r in rows:
         r["class_teacher"] = "class_teacher" in (r.pop("roles") or "")
-        r["label"] = f"{r['class_name']} — {r['section_name']}"
+        r["label"] = labels.class_section(r["class_name"], r["section_name"])
     return rows
 
 
@@ -93,7 +93,8 @@ def _label(sections: list[dict]) -> str:
     groups: dict[str, list[str]] = {}
     for s in sections:
         groups.setdefault(s["class_name"], []).append(s["name"])
-    return " · ".join(f"{c} — {', '.join(names)}" for c, names in groups.items())[:255]
+    return " · ".join(labels.class_section(c, ", ".join(n for n in names if n))
+                      for c, names in groups.items())[:255]
 
 
 # ------------------------------------------------------------------- write

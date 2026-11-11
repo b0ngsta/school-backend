@@ -22,7 +22,7 @@ from app.core.errors import AppError, BadRequest, Conflict, DuplicateKey, Forbid
 from app.core.roles import MANAGERS, STAFF
 from app.db import Db
 from app.models.auth import CurrentUser
-from app.services import notify, pagination
+from app.services import labels, notify, pagination
 from app.services.school_timings import period_start, period_times
 
 MAX_RANGE_DAYS = 31
@@ -103,7 +103,8 @@ def _period_label(row: dict, times: dict[int, dict]) -> str:
     entry = times.get(row["period"])
     if entry:
         parts.append(f"{entry['start']}–{entry['end']}")
-    parts.append(" ".join(p for p in (f"{row['class_name']}-{row['section_name']}", row.get("subject")) if p))
+    where = labels.class_section(row["class_name"], row["section_name"], "-")
+    parts.append(" ".join(p for p in (where, row.get("subject")) if p))
     return " · ".join(parts)
 
 

@@ -5,10 +5,11 @@ mark: managers + the section's CLASS teacher
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from app.core.clock import school_today
 from app.core.errors import BadRequest, NotFound
+from app.core.roles import MANAGERS
 from app.db import Db
 from app.models.attendance import AttendanceMark
 from app.models.auth import CurrentUser
@@ -57,6 +58,37 @@ def get_attendance(db: Db, user: CurrentUser, section_id: int, day: date) -> lis
         "ORDER BY CAST(sp.roll_no AS UNSIGNED), u.full_name",
         (day, db.org, section_id),
     )
+
+
+def history(db: Db, user: CurrentUser, section_id: int, days: int = 30) -> dict:
+    """The days attendance was marked for the section in the last `days` days
+    (newest first) with the counts, whether today is marked and whether the
+    caller may mark (class teacher / managers)."""
+    class_id = _section_class(db, section_id)
+    access.ensure_can_view_section(db, user, class_id, section_id)
+    today = school_today()
+    rows = db.all(
+        "SELECT a.date, SUM(a.status = 'present') AS present, SUM(a.status = 'absent') AS absent, "
+        "SUM(a.status = 'leave') AS on_leave, SUM(a.status = 'half_day') AS half_day, COUNT(*) AS total, "
+        "MAX(m.full_name) AS marked_by_name "
+        "FROM attendance a LEFT JOIN users m ON m.id = a.marked_by "
+        "WHERE a.org_id = %s AND a.section_id = %s AND a.date >= %s "
+        "GROUP BY a.date ORDER BY a.date DESC",
+        (db.org, section_id, today - timedelta(days=days - 1)),
+    )
+    for r in rows:
+        for k in ("present", "absent", "on_leave", "half_day", "total"):
+            r[k] = int(r[k] or 0)
+        r["percentage"] = round((r["present"] + r["half_day"] * 0.5) / r["total"] * 100, 1) if r["total"] else 0.0
+    students = db.scalar(
+        "SELECT COUNT(*) FROM student_profiles sp JOIN users u ON u.id = sp.user_id "
+        "WHERE sp.org_id = %s AND sp.section_id = %s AND u.is_active = 1", (db.org, section_id))
+    can_mark = user.user_type in MANAGERS or (
+        user.user_type == "teacher" and access.is_class_teacher(db, user, class_id, section_id))
+    return {
+        "section_id": section_id, "class_id": class_id, "today": str(today), "students": int(students or 0),
+        "marked_today": any(str(r["date"]) == str(today) for r in rows), "can_mark": can_mark, "days": rows,
+    }
 
 
 def mark_attendance(db: Db, user: CurrentUser, body: AttendanceMark) -> dict:

@@ -123,7 +123,7 @@ def export(db: Db, actor: CurrentUser, user_type: str, class_id: int | None,
         ])
     audit.record(db, actor, "users.export", "user", None,
                  {"user_type": user_type, "section_id": section and section["section_id"], "count": len(users)})
-    where = f"_{section['class_name']}-{section['section_name']}" if section else ""
+    where = ("_" + "-".join(p for p in (section["class_name"], section["section_name"]) if p)) if section else ""
     filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{user_type}s{where}_{school_today().isoformat()}.xlsx")
     return csv_io.write_xlsx([c.name for c in columns], rows, _help(user_type)), filename
 

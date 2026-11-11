@@ -19,7 +19,7 @@ GATED = {
     "attendance": [("teacher1", "teachpass", ["/attendance/stats"]),
                    ("student1", "studpass", ["/student/attendance", "/student/attendance/overview"])],
     "fees": [("admin", None, ["/fees", "/fees/stats", "/fees/claims", "/transactions", "/fee-claim-forms",
-                              "/fee-claim-forms/stats"]),
+                              "/fee-claim-forms/stats", "/fees/overdue-students"]),
              ("student1", "studpass", ["/student/fees", "/fees/claims/mine", "/student/fee-claims"])],
     "transport": [("admin", None, ["/vehicles", "/vehicles/stats"]),
                   ("student1", "studpass", ["/student/transport"])],
