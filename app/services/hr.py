@@ -10,7 +10,7 @@ from app.core.roles import MANAGERS
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.hr import HolidayCreate, LeaveCreate, LeaveUpdate, SalaryCreate
-from app.services import audit, notify, pagination, substitutions
+from app.services import audit, live_tracking, notify, pagination, substitutions
 
 # ====================== holidays ======================
 
@@ -37,6 +37,7 @@ def create_holiday(db: Db, actor: CurrentUser, body: HolidayCreate) -> dict:
         ).lastrowid
     except DuplicateKey:
         raise Conflict("A holiday already exists on that date") from None
+    live_tracking.forget_schedule(db.org)
     return {"id": holiday_id}
 
 
@@ -53,12 +54,14 @@ def update_holiday(db: Db, holiday_id: int, body: HolidayCreate) -> dict:
         raise Conflict("A holiday already exists on that date") from None
     if changed == 0 and not db.one("SELECT id FROM holidays WHERE id = %s AND org_id = %s", (holiday_id, db.org)):
         raise NotFound("Holiday not found")
+    live_tracking.forget_schedule(db.org)
     return {"updated": holiday_id}
 
 
 def delete_holiday(db: Db, holiday_id: int) -> dict:
     if db.execute("DELETE FROM holidays WHERE id = %s AND org_id = %s", (holiday_id, db.org)).rowcount == 0:
         raise NotFound("Holiday not found")
+    live_tracking.forget_schedule(db.org)
     return {"deleted": holiday_id}
 
 

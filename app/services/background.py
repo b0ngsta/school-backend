@@ -297,7 +297,7 @@ def queue_status(db) -> dict:
 
 def work_forever(poll_seconds: float | None = None) -> None:
     """The worker loop (thread from start_worker, or `python -m app.cli run-jobs --forever`)."""
-    from app.services import retention
+    from app.services import live_tracking, retention
 
     poll = poll_seconds or settings.jobs_poll_seconds
     next_daily_check = 0.0
@@ -306,6 +306,7 @@ def work_forever(poll_seconds: float | None = None) -> None:
         ran = 0
         try:
             ran = run_pending()
+            live_tracking.tick_if_due()  # window start: wake the drivers' phones (once a minute)
             if time.monotonic() >= next_daily_check:
                 next_daily_check = time.monotonic() + 600
                 retention.run_if_due()

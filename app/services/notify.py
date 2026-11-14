@@ -153,6 +153,47 @@ def _send_push(payload: list[tuple[int, str, str, str | None, dict]]) -> None:
         db.close()
 
 
+# ------------------------------------------------------ silent (data) push
+
+def send_data(db: Db, user_ids: Iterable[int], data: dict) -> None:
+    """A silent, high-priority push for the app itself (no banner, nothing in the
+    inbox): e.g. "a parent is watching, report the bus faster". Sent through the
+    durable job queue like every push; a no-op without FIREBASE_CREDENTIALS.
+    Only one attempt is worth making: a minute later the news is old."""
+    ids = [uid for uid in dict.fromkeys(user_ids) if uid]
+    if not ids or not push_configured():
+        return
+    background.enqueue(db, _send_data_push, ids, {str(k): str(v) for k, v in data.items()})
+
+
+@background.task(max_attempts=1)
+def _send_data_push(user_ids: list[int], data: dict[str, str]) -> None:
+    app = _firebase_app()
+    if app is None:
+        return
+    from firebase_admin import messaging
+
+    db = Db(pool)
+    try:
+        placeholders = ",".join(["%s"] * len(user_ids))
+        tokens = [r["token"] for r in db.all(
+            f"SELECT token FROM device_tokens WHERE user_id IN ({placeholders})", user_ids)]
+        invalid: list[str] = []
+        for start in range(0, len(tokens), FCM_BATCH):
+            chunk = tokens[start:start + FCM_BATCH]
+            messages = [messaging.Message(token=t, data=data,
+                                          android=messaging.AndroidConfig(priority="high", ttl=60))
+                        for t in chunk]
+            result = messaging.send_each(messages, app=app)
+            for token, response in zip(chunk, result.responses, strict=True):
+                if not response.success and type(response.exception).__name__ in _INVALID_TOKEN_ERRORS:
+                    invalid.append(token)
+        if invalid:
+            db.execute_many("DELETE FROM device_tokens WHERE token = %s", [(t,) for t in invalid])
+    finally:
+        db.close()
+
+
 # ------------------------------------------------- texts used in messages
 
 def day_month(d: date) -> str:

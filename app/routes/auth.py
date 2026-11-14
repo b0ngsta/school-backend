@@ -42,8 +42,9 @@ def new_captcha(db: Db = Depends(get_db)):
 
 
 @router.get("/me")
-def me(user: CurrentUser = Depends(get_current_user)):
-    return user.public()
+def me(user: CurrentUser = Depends(get_current_user), db: Db = Depends(get_db)):
+    """The signed-in user, with `photo_path` (signed link, null = no photo) for the apps' own avatar."""
+    return auth_service.me(db, user)
 
 
 @router.post("/refresh", response_model=TokenResponse)

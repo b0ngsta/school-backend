@@ -105,6 +105,8 @@ def fresh_db(migrated_db):
         db.close()
     from app.services import features
     features._cache.clear()  # ids / features_version start over with the restored rows
+    from app.services import live_tracking
+    live_tracking.reset_caches()
     yield
 
 

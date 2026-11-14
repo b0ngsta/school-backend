@@ -12,6 +12,8 @@ POST /internal/jobs/cleanup. RETENTION_ENABLED=false turns the automatic run off
 | auth_sessions (long expired; HQ shows "last seen" from them) | 365 days after last use | – |
 | auth_login_attempts, auth_reset_requests, password_reset_codes | 30 days (as before) | – |
 | auth_captchas | 1 day after expiry | – |
+| vehicle_location_history (live bus tracking) | 7 days | – |
+| driver_tracking_tokens | 200 days (older than any sign-in) | – |
 
 Rows are deleted in batches of DELETE_BATCH, so no statement holds locks for
 long, and a run stops after MAX_BATCHES per table (the rest goes the next day).
@@ -69,6 +71,9 @@ def run(db: Db) -> dict[str, int]:
                                        (now - timedelta(days=30),)),
         "auth_captchas": _purge(db, "DELETE FROM auth_captchas WHERE expires_at < %s", (now - timedelta(days=1),)),
     }
+    from app.services import live_tracking
+    for table, (sql, params) in live_tracking.purge_statements(now).items():
+        removed[table] = _purge(db, sql, params)
     if any(removed.values()):
         log.info("Clean-up removed old rows: %s", {k: v for k, v in removed.items() if v})
     return removed

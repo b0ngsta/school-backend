@@ -67,6 +67,19 @@ def _payload(row: dict) -> dict:
                                    row["periods_per_day"], breaks),
         "updated_at": row["updated_at"],
         "updated_by_name": row["updated_by_name"],
+        **_tracking(row, breaks),
+    }
+
+
+def _tracking(row: dict, breaks: list[dict]) -> dict:
+    """Live bus tracking windows (services/live_tracking.py): the saved minutes
+    (120 each until the school chooses) and the clock times they give."""
+    from app.services import live_tracking
+
+    return {
+        "tracking_before_minutes": live_tracking._minutes_setting(row.get("tracking_before_minutes")),
+        "tracking_after_minutes": live_tracking._minutes_setting(row.get("tracking_after_minutes")),
+        "tracking_windows": [w.as_dict() for w in live_tracking.windows_from({**row, "breaks": breaks})],
     }
 
 
@@ -124,6 +137,14 @@ def save_timings(db: Db, actor: CurrentUser, body: SchoolTimings, force: bool = 
             "breaks = VALUES(breaks), updated_by = VALUES(updated_by), updated_at = CURRENT_TIMESTAMP",
             (db.org, *values),
         )
+        # only when the client sent them: an older web / app saving the timings keeps the school's choice
+        for column in ("tracking_before_minutes", "tracking_after_minutes"):
+            minutes = getattr(body, column)
+            if minutes is not None:
+                db.execute(f"UPDATE school_timings SET {column} = %s WHERE org_id = %s", (minutes, db.org))
         audit.record(db, actor, "school_timings.update", "school_timings", db.org,
                      {**body.model_dump(), "deleted_slots_after_period": bool(beyond)})
+    from app.services import live_tracking
+
+    live_tracking.forget_schedule(db.org)
     return get_timings(db)

@@ -163,6 +163,12 @@ def authenticate(db: Db, token: str) -> CurrentUser:
 
 # --------------------------------------------------------------- refresh
 
+def me(db: Db, user: CurrentUser) -> dict:
+    """/auth/me: the caller's public fields plus their profile photo (signed on the way out)."""
+    row = db.one("SELECT photo_path FROM users WHERE id = %s AND org_id = %s", (user.id, user.org_id))
+    return {**user.public(), "photo_path": row["photo_path"] if row else None}
+
+
 def refresh(db: Db, refresh_token: str) -> TokenResponse:
     user, session = sessions.rotate(db, refresh_token)
     return token_response(user, session, db)

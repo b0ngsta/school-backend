@@ -21,6 +21,10 @@ class SchoolTimings(BaseModel):
     period_minutes: int = Field(ge=10, le=180)
     periods_per_day: int = Field(default=8, ge=1, le=12)
     breaks: list[Break] = []
+    # Live bus tracking: buses are tracked from this long before the school day starts and
+    # until this long after it ends (0 = that window is off). Left out = keep what is saved.
+    tracking_before_minutes: int | None = Field(default=None, ge=0, le=240)
+    tracking_after_minutes: int | None = Field(default=None, ge=0, le=240)
 
     @field_validator("start_time")
     @classmethod

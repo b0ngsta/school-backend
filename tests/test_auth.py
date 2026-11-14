@@ -22,9 +22,10 @@ def test_login_keeps_original_fields_and_adds_refresh(client):
 
     me = client.get("/auth/me", headers=bearer(body))
     assert me.status_code == 200
-    # the original fields, plus the school the account belongs to and its feature flags (0019)
+    # the original fields, plus the school the account belongs to, its feature flags (0019) and the photo
     assert set(me.json()) == {"id", "username", "full_name", "email", "phone", "user_type", "is_active",
-                              "organisation", "features"}
+                              "organisation", "features", "photo_path"}
+    assert me.json()["photo_path"] is None  # seeded admin has no photo
     assert me.json()["organisation"] == {"id": 1, "code": "DEFAULT", "name": body["org_name"]}
     assert body["org_code"] == "DEFAULT"
 
