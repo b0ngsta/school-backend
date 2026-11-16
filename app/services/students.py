@@ -23,7 +23,7 @@ from app.models.students import (
     StudentCreate,
     StudentUpdate,
 )
-from app.services import access, audit, homework, leaving, notify, pagination
+from app.services import access, audit, homework, leaving, notify, pagination, student_attendance, transport
 
 STUDENT_SELECT = (
     "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.photo_path, u.is_active, "
@@ -182,6 +182,25 @@ def attendance_history(db: Db, user: CurrentUser, student_id: int) -> dict:
         "percentage": round(int(agg["present"] or 0) / total * 100, 1) if total else None,
         "total_marked": total,
     }
+
+
+def attendance_month(db: Db, user: CurrentUser, student_id: int, year: int, month: int) -> dict:
+    """The parent's month calendar (GET /student/attendance/month) for staff who
+    may view the student: every day with its status + the month's summary."""
+    _viewable_student(db, user, student_id)
+    return student_attendance.month(db, student_id, year, month)
+
+
+def attendance_overview(db: Db, user: CurrentUser, student_id: int) -> dict:
+    """Session totals + one entry per month, as the parent app shows them."""
+    _viewable_student(db, user, student_id)
+    return student_attendance.overview(db, student_id)
+
+
+def transport_of(db: Db, user: CurrentUser, student_id: int) -> dict | None:
+    """The student's vehicle, driver, stop and times (null = not on school transport)."""
+    _viewable_student(db, user, student_id)
+    return transport.for_student(db, student_id)
 
 
 # ================= homework =================

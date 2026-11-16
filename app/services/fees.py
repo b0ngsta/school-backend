@@ -47,7 +47,9 @@ def stats(db: Db) -> dict:
         f"COALESCE(SUM(CASE WHEN f.status='paid' THEN f.amount END), 0) AS collected, "
         f"COALESCE(SUM(CASE WHEN {EFFECTIVE_STATUS}='pending' THEN f.amount END), 0) AS pending, "
         f"COALESCE(SUM(CASE WHEN {EFFECTIVE_STATUS}='overdue' THEN f.amount END), 0) AS overdue, "
-        f"COALESCE(SUM(f.amount), 0) AS total "
+        f"COALESCE(SUM(f.amount), 0) AS total, "
+        # students who still owe something (pending or overdue): the app home's "138 students" (Nov 2026)
+        f"COUNT(DISTINCT CASE WHEN f.status = 'pending' THEN f.student_id END) AS due_students "
         f"FROM fees f WHERE f.org_id = %s",
         (db.org,),
     )
@@ -58,6 +60,7 @@ def stats(db: Db) -> dict:
         "overdue": float(row["overdue"]),
         "total": total,
         "collection_rate": round(collected / total * 100, 1) if total else 0.0,
+        "due_students": int(row["due_students"] or 0),
     }
 
 

@@ -149,7 +149,10 @@ def test_a_paid_fee_can_be_marked_unpaid_again(client, school):
     txns = _ok(client.get("/transactions", headers=a))
     assert [(t["fee_id"], t["status"]) for t in txns] == [(fee, "reversed")]
     assert _ok(client.get("/transactions/stats", headers=a))["month_collection"] == 0
-    assert _ok(client.get("/fees/stats", headers=a))["collected"] == 0
+    stats = _ok(client.get("/fees/stats", headers=a))
+    assert stats["collected"] == 0
+    # one student owes again: the app home's "N students" under Due Fees (Nov 2026)
+    assert stats["due_students"] == 1
     kid = bearer(login(client, "student1", "studpass"))
     assert _ok(client.get("/student/fees", headers=kid))["records"][0]["status"] == "pending"
     told = [n["title"] for n in _ok(client.get("/notifications", headers=kid))]

@@ -326,6 +326,9 @@ def test_every_list_shows_only_the_own_school(client, schools):
             f"/fees/students/{me.student}/history", f"/fees/class-plan?class_id={me.cls}",
             f"/exam-format?class_id={me.cls}", f"/final-results?section_id={me.sec}",
             f"/students/{me.student}/exam-results", "/student/final-result",
+            # student profile: attendance calendar + transport (15 Nov 2026)
+            f"/students/{me.student}/attendance/month?year={school_today().year}&month={school_today().month}",
+            f"/students/{me.student}/attendance/overview", f"/students/{me.student}/transport",
         ]
         seen_own = 0
         for role in (me.admin, me.t, me.s):
@@ -391,6 +394,10 @@ def test_ids_from_another_school_are_not_found(client, schools):
         c.get(f"/final-results/template?section_id={a.sec}", headers=h),
         c.put("/final-results/publish", headers=h, json={"section_id": a.sec}),
         c.get(f"/students/{a.student}/exam-results", headers=h),
+        c.get(f"/students/{a.student}/transport", headers=h),
+        c.get(f"/students/{a.student}/attendance/month?year=2026&month=11", headers=h),
+        c.put(f"/vehicles/{a.vehicle}", headers=h,
+              json={"new_driver": {"username": "intruder2", "password": "drive123"}}),
         c.delete(f"/fees/{a.fee}", headers=h),
         c.put(f"/fees/claims/{a.claim}/approve", headers=h, json={}),
         c.put(f"/fee-claim-forms/{a.claim_form}/accept", headers=h, json={}),

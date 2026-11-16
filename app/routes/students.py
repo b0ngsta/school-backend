@@ -85,6 +85,28 @@ def student_attendance(student_id: int, user: CurrentUser = Depends(staff), db: 
     return student_service.attendance_history(db, user, student_id)
 
 
+@router.get("/{student_id}/attendance/month", dependencies=[Depends(require_feature("attendance"))])
+def student_attendance_month(student_id: int, year: int, month: int, user: CurrentUser = Depends(staff),
+                             db: Db = Depends(get_db)):
+    """Every day of one month (present / absent / leave / half_day / holiday / sunday /
+    not_marked) + summary — the parent app's calendar, for staff who can view the student."""
+    return student_service.attendance_month(db, user, student_id, year, month)
+
+
+@router.get("/{student_id}/attendance/overview", dependencies=[Depends(require_feature("attendance"))])
+def student_attendance_overview(student_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    return student_service.attendance_overview(db, user, student_id)
+
+
+# ================= transport =================
+
+@router.get("/{student_id}/transport", dependencies=[Depends(require_feature("transport"))])
+def student_transport(student_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """Vehicle, driver, stop and times (null = not on school transport). Change it with
+    PUT / DELETE /vehicles/{vehicle_id}/students/{student_id} (managers)."""
+    return student_service.transport_of(db, user, student_id)
+
+
 # ================= exam results =================
 
 @router.get("/{student_id}/exam-results")

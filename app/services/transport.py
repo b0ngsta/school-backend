@@ -1,12 +1,18 @@
 """Transport — vehicles (bus / van) & routes, and which students ride which
-vehicle (stop, pickup and drop time). There is no live tracking: parents see
-the vehicle, the driver and their child's stop and times."""
+vehicle (stop, pickup and drop time). Parents see the vehicle, the driver and
+their child's stop and times (live position: services/live_tracking.py).
+
+Add / Edit vehicle can also create the driver's sign-in in the same request
+(`new_driver`), in one transaction with the vehicle."""
 from __future__ import annotations
 
 from app.core.errors import BadRequest, Conflict, DuplicateKey, NotFound
 from app.db import Db
-from app.models.transport import StudentTransportSave, VehicleCreate, VehicleUpdate
+from app.models.auth import CurrentUser
+from app.models.transport import NewDriver, StudentTransportSave, VehicleCreate, VehicleUpdate
+from app.models.users import StaffCreate
 from app.services import times
+from app.services import users as user_service
 
 _VEHICLE_COLUMNS = ("vehicle_no", "driver_name", "driver_phone", "route_name", "capacity", "status",
                     "vehicle_type", "driver_id", "shift_name", "shift_start", "shift_end")
@@ -47,31 +53,65 @@ def _check_shift(start, end) -> None:
         raise BadRequest("The shift must end after it starts")
 
 
-def create_vehicle(db: Db, body: VehicleCreate) -> dict:
-    if db.one("SELECT id FROM vehicles WHERE org_id = %s AND vehicle_no = %s", (db.org, body.vehicle_no)):
-        raise Conflict("Vehicle number already exists")
-    _check_driver(db, body.driver_id)
-    _check_shift(body.shift_start, body.shift_end)
-    try:
-        vehicle_id = db.execute(
-            f"INSERT INTO vehicles (org_id, {', '.join(_VEHICLE_COLUMNS)}) "
-            f"VALUES (%s, {', '.join(['%s'] * len(_VEHICLE_COLUMNS))})",
-            (db.org, *(getattr(body, c) for c in _VEHICLE_COLUMNS)),
-        ).lastrowid
-    except DuplicateKey:
-        raise Conflict("Vehicle number already exists") from None
-    return {"id": vehicle_id}
+def _create_driver(db: Db, actor: CurrentUser, new: NewDriver, name: str | None, phone: str | None) -> int:
+    """The driver's sign-in, made inside the vehicle's transaction (same rules
+    and audit entry as POST /users)."""
+    full_name = (name or "").strip()
+    if not full_name:
+        raise BadRequest("Enter the driver's name for the new account")
+    created = user_service.create_staff(db, actor, StaffCreate(
+        username=new.username.strip(), password=new.password, full_name=full_name,
+        email=new.email, phone=(phone or "").strip() or None, user_type="driver"))
+    return created["id"]
 
 
-def update_vehicle(db: Db, vehicle_id: int, body: VehicleUpdate) -> dict:
+def create_vehicle(db: Db, body: VehicleCreate, actor: CurrentUser | None = None) -> dict:
+    if body.new_driver and body.driver_id is not None:
+        raise BadRequest("Choose an existing driver account or create a new one, not both")
+    with db.transaction():
+        if db.one("SELECT id FROM vehicles WHERE org_id = %s AND vehicle_no = %s", (db.org, body.vehicle_no)):
+            raise Conflict("Vehicle number already exists")
+        _check_shift(body.shift_start, body.shift_end)
+        driver_created = None
+        if body.new_driver:
+            if actor is None:
+                raise BadRequest("A new driver account needs a signed-in manager")
+            driver_created = _create_driver(db, actor, body.new_driver, body.driver_name, body.driver_phone)
+            body = body.model_copy(update={"driver_id": driver_created})
+        _check_driver(db, body.driver_id)
+        try:
+            vehicle_id = db.execute(
+                f"INSERT INTO vehicles (org_id, {', '.join(_VEHICLE_COLUMNS)}) "
+                f"VALUES (%s, {', '.join(['%s'] * len(_VEHICLE_COLUMNS))})",
+                (db.org, *(getattr(body, c) for c in _VEHICLE_COLUMNS)),
+            ).lastrowid
+        except DuplicateKey:
+            raise Conflict("Vehicle number already exists") from None
+    result = {"id": vehicle_id}
+    if driver_created:
+        result["driver_id"] = driver_created
+    return result
+
+
+def update_vehicle(db: Db, vehicle_id: int, body: VehicleUpdate, actor: CurrentUser | None = None) -> dict:
+    if body.new_driver and body.driver_id is not None:
+        raise BadRequest("Choose an existing driver account or create a new one, not both")
+    driver_created = None
     with db.transaction():
         current = db.one("SELECT * FROM vehicles WHERE id = %s AND org_id = %s FOR UPDATE", (vehicle_id, db.org))
         if not current:
             raise NotFound("Vehicle not found")
-        changes = body.model_dump(exclude_unset=True)
+        changes = body.model_dump(exclude_unset=True, exclude={"new_driver"})
         for column in ("vehicle_no", "driver_name", "status", "vehicle_type"):  # NOT NULL columns
             if changes.get(column, "") is None:
                 changes.pop(column)
+        if body.new_driver:
+            if actor is None:
+                raise BadRequest("A new driver account needs a signed-in manager")
+            driver_created = _create_driver(db, actor, body.new_driver,
+                                            changes.get("driver_name", current["driver_name"]),
+                                            changes.get("driver_phone", current["driver_phone"]))
+            changes["driver_id"] = driver_created
         if "driver_id" in changes:
             _check_driver(db, changes["driver_id"])
         merged = {**current, **changes}
@@ -83,7 +123,10 @@ def update_vehicle(db: Db, vehicle_id: int, body: VehicleUpdate) -> dict:
             )
         except DuplicateKey:
             raise Conflict("Vehicle number already exists") from None
-    return {"updated": vehicle_id}
+    result = {"updated": vehicle_id}
+    if driver_created:
+        result["driver_id"] = driver_created
+    return result
 
 
 def delete_vehicle(db: Db, vehicle_id: int) -> dict:

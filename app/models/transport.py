@@ -1,9 +1,26 @@
 from datetime import time
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.core.validators import clean_email
+from app.models.common import PASSWORD_MAX_LENGTH
 
 VehicleType = Literal["bus", "van", "other"]
+
+
+class NewDriver(BaseModel):
+    """A driver sign-in made together with the vehicle (Add / Edit vehicle form).
+    The account's name and phone are the vehicle's driver_name / driver_phone."""
+
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=6, max_length=PASSWORD_MAX_LENGTH)
+    email: str | None = None
+
+    @field_validator("email")
+    @classmethod
+    def _valid_email(cls, value: str | None) -> str | None:
+        return clean_email(value)
 
 
 class VehicleCreate(BaseModel):
@@ -18,6 +35,8 @@ class VehicleCreate(BaseModel):
     shift_name: str | None = Field(default=None, max_length=50)
     shift_start: time | None = None
     shift_end: time | None = None
+    new_driver: NewDriver | None = Field(
+        default=None, description="Create a driver account and link it (instead of driver_id)")
 
 
 class VehicleUpdate(BaseModel):
@@ -32,6 +51,8 @@ class VehicleUpdate(BaseModel):
     shift_name: str | None = Field(default=None, max_length=50)
     shift_start: time | None = None
     shift_end: time | None = None
+    new_driver: NewDriver | None = Field(
+        default=None, description="Create a driver account and link it (instead of driver_id)")
 
 
 class StudentTransportSave(BaseModel):

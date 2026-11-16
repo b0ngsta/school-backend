@@ -28,13 +28,15 @@ def list_vehicles(actor: CurrentUser = Depends(viewer), db: Db = Depends(get_db)
 
 @router.post("", status_code=201)
 def create_vehicle(body: VehicleCreate, actor: CurrentUser = Depends(manager), db: Db = Depends(get_db)):
-    return transport_service.create_vehicle(db, body)
+    """`new_driver {username, password, email?}` also creates the driver's sign-in
+    (name / phone = driver_name / driver_phone) and links it, in one transaction."""
+    return transport_service.create_vehicle(db, body, actor)
 
 
 @router.put("/{vehicle_id}")
 def update_vehicle(vehicle_id: int, body: VehicleUpdate, actor: CurrentUser = Depends(manager),
                    db: Db = Depends(get_db)):
-    return transport_service.update_vehicle(db, vehicle_id, body)
+    return transport_service.update_vehicle(db, vehicle_id, body, actor)
 
 
 @router.delete("/{vehicle_id}")
