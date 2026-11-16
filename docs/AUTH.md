@@ -253,3 +253,25 @@ Users logged in with the old token format are asked to log in once after the
 upgrade. If your frontend does not implement `/auth/refresh` yet, deploy with
 `ACCESS_TOKEN_EXPIRE_MINUTES=1440` (24 h, the old behaviour) and lower it to
 15 once the refresh logic above ships.
+
+## Brothers and sisters: one username, several children (migration 0024)
+
+Student accounts of one school may share a username (the office gives siblings the same one, usually a
+parent's mobile number). Staff and driver usernames stay unique, also against students.
+
+- **Sign-in**: with one account behind the username nothing changed. With several, the password decides:
+  it is tried on the accounts that can sign in, oldest first (at most 10), and the first match is signed in.
+  Children with the same password always open the oldest account; the others are reached with "Switch child".
+  A wrong password is the usual 401 and counts as ONE failure against the shared key `"<org>:<username>"`
+  (throttling and CAPTCHA as described above). The password of a child who has left gets the usual 403.
+- **`GET /student/siblings`**: the caller's brothers and sisters (active students of the same school with the
+  same username). **`POST /auth/switch-sibling {student_id}`**: ends the caller's session and returns an
+  ordinary token response for that sibling, without a password; anybody else's id is 404. Audited as
+  `auth.switch_sibling`.
+- **Sharing a username is always confirmed by the office**: `POST /students` and
+  `PUT /students/{id}/username` answer 409 `code: "username_shared"` with the students who have it, and go
+  through with `sibling: true`.
+- **Forgot password** on a shared username sends no code (it could not say which child it is for): each email
+  on file gets a note that the school office sets the password. The reply is the same as for any login.
+- **CLI**: add `--id <account id>` when several accounts share the username.
+

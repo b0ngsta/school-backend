@@ -89,6 +89,7 @@ class ServiceUnavailable(AppError):
 _DUPLICATE_MESSAGES = {
     "username": "Username already exists",
     "uq_users_org_username": "Username already exists",
+    "uq_users_org_staff_username": "Username already exists",
     "uq_student_admission_no": "Admission number already exists",
     "uq_student_org_admission_no": "Admission number already exists",
     "uq_student_section_roll": "Roll number already used in this section",

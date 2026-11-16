@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends
 
 from app.db import Db
-from app.dependencies import get_current_user, get_db, get_optional_user
+from app.dependencies import get_current_user, get_db, get_optional_user, require_roles
 from app.models.auth import (
     CaptchaResponse,
     ChangePasswordRequest,
@@ -14,11 +14,12 @@ from app.models.auth import (
     LogoutRequest,
     RefreshRequest,
     ResetPasswordRequest,
+    SwitchSiblingRequest,
     TokenResponse,
     VerifyResetCodeRequest,
 )
 from app.services import auth as auth_service
-from app.services import captcha, password_reset
+from app.services import captcha, password_reset, siblings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -52,6 +53,16 @@ def refresh(body: RefreshRequest, db: Db = Depends(get_db)):
     """Exchange a refresh token for a new access + refresh token pair.
     Call it when an API request returns 401, or when the app resumes."""
     return auth_service.refresh(db, body.refresh_token)
+
+
+@router.post("/switch-sibling", response_model=TokenResponse)
+def switch_sibling(body: SwitchSiblingRequest, user: CurrentUser = Depends(require_roles("student")),
+                   db: Db = Depends(get_db)):
+    """The parent app's "Switch child": sign this phone in as a brother or sister
+    (a student of the same school with the same username; see GET /student/siblings)
+    without typing a password again. This sign-in ends; the reply is an ordinary
+    token response for the other child. Anyone else's id: 404."""
+    return siblings.switch(db, user, body.student_id)
 
 
 @router.post("/logout")

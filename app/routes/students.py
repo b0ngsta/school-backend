@@ -19,8 +19,9 @@ from app.models.students import (
     ReportCardCreate,
     StudentCreate,
     StudentUpdate,
+    StudentUsername,
 )
-from app.services import final_results, leaving
+from app.services import final_results, leaving, siblings
 from app.services import students as student_service
 from app.services.pagination import Page
 
@@ -61,6 +62,16 @@ def get_student(student_id: int, user: CurrentUser = Depends(staff), db: Db = De
 def update_student(student_id: int, body: StudentUpdate, user: CurrentUser = Depends(staff),
                    db: Db = Depends(get_db)):
     return student_service.update_student(db, user, student_id, body)
+
+
+@router.put("/{student_id}/username")
+def change_username(student_id: int, body: StudentUsername, user: CurrentUser = Depends(manager),
+                    db: Db = Depends(get_db)):
+    """The office gives a student another username, e.g. the one a brother or sister
+    has, so the parent can switch between them in the app. A username another student
+    has: 409 `code: "username_shared"` with `siblings`; send again with `sibling: true`
+    to share it. A staff username: 409. The password stays as it is."""
+    return siblings.rename_student(db, user, student_id, body)
 
 
 @router.delete("/{student_id}")

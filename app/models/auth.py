@@ -61,6 +61,12 @@ class TokenResponse(BaseModel):
 LoginResponse = TokenResponse
 
 
+class SwitchSiblingRequest(BaseModel):
+    """POST /auth/switch-sibling: the brother or sister (GET /student/siblings) to sign in as."""
+
+    student_id: int = Field(gt=0)
+
+
 class RefreshRequest(BaseModel):
     refresh_token: str = Field(max_length=200)
 

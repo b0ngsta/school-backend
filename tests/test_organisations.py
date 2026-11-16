@@ -329,6 +329,8 @@ def test_every_list_shows_only_the_own_school(client, schools):
             # student profile: attendance calendar + transport (15 Nov 2026)
             f"/students/{me.student}/attendance/month?year={school_today().year}&month={school_today().month}",
             f"/students/{me.student}/attendance/overview", f"/students/{me.student}/transport",
+            # brothers and sisters (migration 0024): both schools have a "student1", they are not siblings
+            "/student/siblings",
         ]
         seen_own = 0
         for role in (me.admin, me.t, me.s):
@@ -491,6 +493,9 @@ def test_ids_from_another_school_are_not_found(client, schools):
         c.post(f"/class-announcements/{a.class_ann}/attachment", headers=h,
                files={"file": ("p.png", _png(), "image/png")}),
         c.delete(f"/class-announcements/{a.class_ann}/attachment", headers=h),
+        # siblings (migration 0024): the same username in another school is nobody's brother or sister
+        c.post("/auth/switch-sibling", headers=bearer(b.s), json={"student_id": a.student}),
+        c.put(f"/students/{a.student}/username", headers=h, json={"username": "hijacked"}),
     ]
     for r in blocked:
         assert r.status_code in (400, 403, 404), f"{r.request.method} {r.request.url}: {r.status_code} {r.text}"

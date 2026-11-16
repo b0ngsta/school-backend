@@ -28,7 +28,7 @@ from app.core.errors import BadRequest, Conflict, DuplicateKey, Forbidden, NotFo
 from app.core.roles import ADMIN_MANAGED, MANAGERS
 from app.db import Db
 from app.models.auth import CurrentUser
-from app.services import access, audit
+from app.services import access, audit, siblings
 from app.services.user_import import csv_io, photos, planner, writer
 from app.services.user_import.columns import USER_TYPES, columns_for
 from app.services.user_import.photos import PHOTO_MAX_MB, PhotoArchive
@@ -167,6 +167,7 @@ def run_import(db: Db, actor: CurrentUser, *, user_type: str, class_id: int | No
     committed = False
     try:
         with db.transaction():
+            siblings.lock_school(db)  # like every account creation (username rules, migration 0024)
             locked = planner.build(db, user_type, section, parsed, archive, lock=True, photos_checked=True)
             if locked.signature() != plan.signature():
                 raise Conflict(CHANGED_WHILE_SAVING)

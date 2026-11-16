@@ -109,7 +109,10 @@ def _handle_request(org_id: int, login: str, ip: str | None, now: datetime) -> N
             db.execute("DELETE FROM password_reset_codes WHERE created_at < %s LIMIT 1000",
                        (now - timedelta(days=RETENTION_DAYS),))
             accounts = _find_accounts(db, org_id, login)
-            if len(accounts) > 1:
+            if len(accounts) > 1 and _share_a_username(accounts):
+                # siblings: a code could not say which child it is for; the office sets the password
+                email.send_after_commit(db, _shared_username_emails(accounts))
+            elif len(accounts) > 1:
                 email.send_after_commit(db, [_several_accounts_email(login, accounts)])
             elif accounts and accounts[0]["is_active"] and accounts[0]["email"]:
                 _issue_code(db, accounts[0], ip, now)
@@ -149,9 +152,14 @@ def _find_accounts(db: Db, org_id: int, login: str) -> list[dict]:
     using that email address (comparison is case-insensitive, like logins)."""
     if not login:
         return []
-    user = db.one(_ACCOUNT_SELECT + "WHERE u.org_id = %s AND u.username = %s", (org_id, login))
-    if user:
-        return [user]
+    users = db.all(_ACCOUNT_SELECT + "WHERE u.org_id = %s AND u.username = %s ORDER BY u.id LIMIT %s",
+                   (org_id, login, MAX_LISTED_ACCOUNTS))
+    if len(users) > 1:
+        # brothers and sisters share the username (migration 0024); one who left does not
+        # stand in the way of the others
+        users = [u for u in users if u["is_active"]] or users
+    if users:
+        return users
     if "@" not in login:
         return []
     return db.all(
@@ -305,6 +313,38 @@ def _several_accounts_email(address: str, accounts: list[dict]) -> OutgoingEmail
         text=f"{intro}\n\n" + "\n".join(f"  - {n}" for n in names) + f"\n\n{outro}\n\n— {school}\n",
         html=_html([e(intro), "<br>".join(e(n) for n in names), e(outro), f"— {e(school)}"]),
     )
+
+
+def _share_a_username(accounts: list[dict]) -> bool:
+    return len({a["username"].casefold() for a in accounts}) == 1
+
+
+def _shared_username_emails(accounts: list[dict]) -> list[OutgoingEmail]:
+    """One message per email address on file: who shares the username, and that
+    the school office sets a new password (no code is sent)."""
+    active = [a for a in accounts if a["is_active"]]
+    if not active:
+        return []
+    school, username = _school(active[0]), active[0]["username"]
+    names = [a["full_name"] for a in active]
+    intro = f"These {school} accounts share the username '{username}', each with its own password:"
+    outro = ("A password cannot be reset by email for a shared username. Please ask the school office to set a "
+             "new password for the child who needs one. If you did not ask for this, ignore this email.")
+    e = html.escape
+    by_address: dict[str, str] = {}
+    for a in active:
+        address = (a["email"] or "").strip()
+        if address:
+            by_address.setdefault(address.lower(), address)
+    return [
+        OutgoingEmail(
+            to=address,
+            subject=f"Your {school} accounts",
+            text=f"{intro}\n\n" + "\n".join(f"  - {n}" for n in names) + f"\n\n{outro}\n\n— {school}\n",
+            html=_html([e(intro), "<br>".join(e(n) for n in names), e(outro), f"— {e(school)}"]),
+        )
+        for address in by_address.values()
+    ]
 
 
 def _password_changed_email(user: dict) -> OutgoingEmail:

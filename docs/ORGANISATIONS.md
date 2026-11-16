@@ -107,3 +107,11 @@ will get "School code not found".
 * `tests/test_organisations.py` builds two schools with the same names and
   reads every GET endpoint as each role of each school; new list endpoints are
   covered automatically.
+
+## Usernames and siblings (migration 0024)
+
+Usernames are per school. Inside a school a staff / driver username is unique (`uq_users_org_staff_username`),
+while student accounts may share one when the office confirms they are brothers and sisters
+(`services/siblings.py`, `docs/AUTH.md`). The same username in two schools never links anybody: every sibling
+query filters `org_id` like the rest of the API (`tests/test_siblings.py`, `tests/test_organisations.py`).
+

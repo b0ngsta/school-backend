@@ -3,6 +3,7 @@
     python -m app.cli set-password <username> [--org CODE]   # prompts for the new password
     python -m app.cli revoke-sessions <username> [--org CODE] # sign the user out everywhere
     python -m app.cli list-sessions <username> [--org CODE]
+                                                  # several students share the username: add --id <account id>
     python -m app.cli check-db                    # connection, TLS and round-trip latency
     python -m app.cli check-data                  # duplicate numbers, extra principals, missing emails
     python -m app.cli copy-uploads-to-s3          # copy UPLOAD_DIR into the S3 bucket
@@ -51,15 +52,32 @@ def _org(db: Db, code: str | None) -> dict:
     return org
 
 
-def _user_id(db: Db, username: str) -> int:
-    row = db.one("SELECT id FROM users WHERE org_id = %s AND username = %s", (db.org, username))
-    if not row:
+def _user_id(db: Db, username: str, user_id: int | None = None) -> int:
+    """The account a command is for. Students who are brothers / sisters may share
+    a username (migration 0024): then the command needs --id."""
+    rows = db.all(
+        "SELECT u.id, u.full_name, u.user_type, u.left_on, c.name AS class_name, s.name AS section_name "
+        "FROM users u LEFT JOIN student_profiles sp ON sp.user_id = u.id "
+        "LEFT JOIN classes c ON c.id = COALESCE(sp.class_id, sp.last_class_id) "
+        "LEFT JOIN sections s ON s.id = COALESCE(sp.section_id, sp.last_section_id) "
+        "WHERE u.org_id = %s AND u.username = %s ORDER BY u.id", (db.org, username))
+    if not rows:
         sys.exit(f"No user named {username!r} in this school")
-    return row["id"]
+    if user_id is not None:
+        if user_id not in {r["id"] for r in rows}:
+            sys.exit(f"No account with id {user_id} has the username {username!r} in this school")
+        return user_id
+    if len(rows) > 1:
+        lines = "\n".join(
+            f"  --id {r['id']}  {r['full_name']} ({r['user_type']}"
+            f"{', ' + ' '.join(p for p in (r['class_name'], r['section_name']) if p) if r['class_name'] else ''}"
+            f"{', left' if r['left_on'] else ''})" for r in rows)
+        sys.exit(f"{len(rows)} accounts share the username {username!r}. Run the command again with one of:\n{lines}")
+    return rows[0]["id"]
 
 
-def set_password(db: Db, username: str) -> None:
-    user_id = _user_id(db, username)
+def set_password(db: Db, username: str, account_id: int | None = None) -> None:
+    user_id = _user_id(db, username, account_id)
     password = getpass.getpass("New password: ")
     if len(password) < 8 or len(password) > PASSWORD_MAX_LENGTH:
         sys.exit("Use 8 to 128 characters.")
@@ -70,19 +88,19 @@ def set_password(db: Db, username: str) -> None:
     print(f"Password for {username!r} changed; all of its sessions were signed out.")
 
 
-def revoke_sessions(db: Db, username: str) -> None:
-    user_id = _user_id(db, username)
+def revoke_sessions(db: Db, username: str, account_id: int | None = None) -> None:
+    user_id = _user_id(db, username, account_id)
     with db.transaction():
         db.execute("UPDATE users SET token_version = token_version + 1 WHERE id = %s", (user_id,))
         sessions.revoke_all(db, user_id, "revoked_cli")
     print(f"All sessions of {username!r} revoked.")
 
 
-def list_sessions(db: Db, username: str) -> None:
+def list_sessions(db: Db, username: str, account_id: int | None = None) -> None:
     rows = db.all(
         "SELECT id, created_at, last_used_at, expires_at, revoked_at, revoke_reason, ip, user_agent "
         "FROM auth_sessions WHERE user_id = %s ORDER BY last_used_at DESC",
-        (_user_id(db, username),),
+        (_user_id(db, username, account_id),),
     )
     for r in rows:
         state = f"revoked ({r['revoke_reason']})" if r["revoked_at"] else f"active until {r['expires_at']} UTC"
@@ -380,6 +398,8 @@ def main() -> None:
                                                    "missing-uploads", "optimize-uploads"]))
     parser.add_argument("args", nargs="*", help="username, or school code [and name] for the *-org commands")
     parser.add_argument("--org", help="school code (default: DEFAULT_ORG_CODE)")
+    parser.add_argument("--id", type=int, help="set-password / revoke-sessions / list-sessions: the account id, "
+                                               "when several students (brothers / sisters) share the username")
     parser.add_argument("--admin-username", default="admin")
     parser.add_argument("--admin-email")
     parser.add_argument("--dry-run", action="store_true", help="optimize-uploads: only report what it would save")
@@ -427,7 +447,7 @@ def main() -> None:
             update_org(db, args.args[0], is_active=args.command == "enable-org")
         else:
             _org(db, args.org)
-            USER_COMMANDS[args.command](db, args.args[0])
+            USER_COMMANDS[args.command](db, args.args[0], args.id)
     finally:
         db.close()
         pool.close_all()

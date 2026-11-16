@@ -17,6 +17,7 @@ from app.services import (
     class_announcements,
     documents,
     performance,
+    siblings,
     student_attendance,
     transport,
 )
@@ -31,6 +32,13 @@ me = require_roles("student")
 @router.get("/me")
 def my_profile(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     return portal.profile(db, user.id)
+
+
+@router.get("/siblings")
+def my_siblings(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
+    """Brothers and sisters: the other active students of this school with the same
+    username (the app's "Switch child" list; [] = none). See POST /auth/switch-sibling."""
+    return siblings.list_for(db, user)
 
 
 @router.get("/dashboard")

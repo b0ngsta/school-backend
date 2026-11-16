@@ -23,7 +23,17 @@ from app.models.students import (
     StudentCreate,
     StudentUpdate,
 )
-from app.services import access, audit, homework, leaving, notify, pagination, student_attendance, transport
+from app.services import (
+    access,
+    audit,
+    homework,
+    leaving,
+    notify,
+    pagination,
+    siblings,
+    student_attendance,
+    transport,
+)
 
 STUDENT_SELECT = (
     "SELECT u.id, u.username, u.full_name, u.email, u.phone, u.photo_path, u.is_active, "
@@ -72,9 +82,8 @@ def create_student(db: Db, actor: CurrentUser, body: StudentCreate) -> dict:
     with db.transaction():
         access.ensure_can_edit_students(db, actor, body.class_id, body.section_id)
         _ensure_section_in_class(db, body.class_id, body.section_id)
-        taken = leaving.username_taken(db, body.username)
-        if taken:
-            raise Conflict(taken)
+        # free, or shared with brothers / sisters when the request confirms it (services/siblings.py)
+        siblings.check_student_username(db, body.username, sibling=body.sibling)
         try:
             student_id = db.execute(
                 "INSERT INTO users (org_id, username, password_hash, full_name, email, phone, user_type) "

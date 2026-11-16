@@ -35,6 +35,8 @@ from app.services import (
 
 INVALID_CREDENTIALS = "Invalid username or password"
 INVALID_TOKEN = "Invalid or expired token"
+# sign-in checks the password against at most this many accounts with one username (Argon2 is slow on purpose)
+MAX_SHARED_ACCOUNTS = 10
 
 
 def _invalid_credentials() -> Unauthorized:
@@ -76,24 +78,31 @@ def login(db: Db, username: str, password: str, org_code: str | None = None,
     if login_throttle.assess(db, key, ip, device, captcha_supported).captcha_required:
         captcha.verify(db, captcha_id, captcha_answer)  # 428 until the picture is solved
 
-    user = db.one(
+    accounts = db.all(
         "SELECT id, password_hash, full_name, user_type, is_active, left_on, token_version, must_change_password, "
         "org_id "
-        "FROM users WHERE org_id = %s AND username = %s",
-        (org["id"], username),
+        "FROM users WHERE org_id = %s AND username = %s ORDER BY is_active DESC, id LIMIT %s",
+        (org["id"], username, MAX_SHARED_ACCOUNTS),
     )
-    if user is None:
-        security.burn_password_check(password)
-        _record_failure(db, key, ip, device)
-        raise _invalid_credentials()
+    if len(accounts) > 1:
+        # brothers and sisters share the username (migration 0024): the password says which child
+        user, needs_rehash = _account_for_password(accounts, password)
+        if user is None:
+            _record_failure(db, key, ip, device)
+            raise _invalid_credentials()
+    else:
+        user = accounts[0] if accounts else None
+        if user is None:
+            security.burn_password_check(password)
+            _record_failure(db, key, ip, device)
+            raise _invalid_credentials()
 
-    matches, needs_rehash = security.verify_password(password, user["password_hash"])
-    if not matches:
-        _record_failure(db, key, ip, device)
-        raise _invalid_credentials()
-    if not user["is_active"]:
-        raise Forbidden("This account is marked as left the school. Contact the school office."
-                        if user["left_on"] else "Account disabled")
+        matches, needs_rehash = security.verify_password(password, user["password_hash"])
+        if not matches:
+            _record_failure(db, key, ip, device)
+            raise _invalid_credentials()
+        if not user["is_active"]:
+            raise _inactive(user)
 
     with db.transaction():
         if needs_rehash:  # upgrade legacy SHA-256 hashes to Argon2 transparently
@@ -102,6 +111,30 @@ def login(db: Db, username: str, password: str, org_code: str | None = None,
         login_throttle.record(db, key, ip, success=True, device=device)
         session = sessions.open_session(db, user["id"])
     return token_response({**user, "org_code": org["code"], "org_name": org["name"]}, session, db)
+
+
+def _inactive(user: dict) -> Forbidden:
+    return Forbidden("This account is marked as left the school. Contact the school office."
+                     if user["left_on"] else "Account disabled")
+
+
+def _account_for_password(accounts: list[dict], password: str) -> tuple[dict | None, bool]:
+    """Several accounts share the username: the one this password opens, as
+    (account, needs_rehash). Accounts that can sign in are tried first, oldest
+    first, so children with the same password always open the same one (the
+    others are reached with "Switch child"). The password of an account that has
+    left / is disabled gets the same 403 as always, but only when it opens no
+    active account. (None, False) = it opens nothing."""
+    for can_sign_in in (True, False):
+        for account in accounts:
+            if bool(account["is_active"]) != can_sign_in:
+                continue
+            matches, needs_rehash = security.verify_password(password, account["password_hash"])
+            if matches:
+                if not can_sign_in:
+                    raise _inactive(account)
+                return account, needs_rehash
+    return None, False
 
 
 def _record_failure(db: Db, key: str, ip: str | None, device: str | None = None) -> None:

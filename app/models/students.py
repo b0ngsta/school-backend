@@ -38,12 +38,30 @@ class StudentCreate(StudentBase):
     password: str = Field(min_length=6, max_length=PASSWORD_MAX_LENGTH)
     class_id: int
     section_id: int
+    # true = "yes, a brother or sister of the student(s) who already have this username"
+    # (answers a 409 with code "username_shared"; services/siblings.py). Ignored for a free username.
+    sibling: bool = False
 
     @model_validator(mode="after")
     def _email_required(self):
         if settings.require_user_email and not (self.email or "").strip():
             raise ValueError(EMAIL_REQUIRED)
         return self
+
+
+class StudentUsername(BaseModel):
+    """PUT /students/{id}/username: the office gives a student another username."""
+
+    username: str = Field(min_length=3, max_length=50)
+    sibling: bool = Field(default=False, description="Confirm sharing the username with the students who have it")
+
+    @field_validator("username")
+    @classmethod
+    def _no_spaces(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 3 or any(ch.isspace() for ch in value):
+            raise ValueError("Username: at least 3 characters, no spaces")
+        return value
 
 
 class StudentUpdate(StudentBase):

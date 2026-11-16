@@ -136,7 +136,11 @@ def build(db: Db, user_type: str, section: dict | None, parsed: ParsedCsv,
     _mark_duplicate_usernames(plan.rows)
     existing = _existing_users(db, [r.username for r in plan.rows if r.username], lock)
     for row in plan.rows:
-        _decide(row, existing.get(fold(row.username)) if row.username else None, plan)
+        user, problem = _account_for(row, existing.get(fold(row.username), []) if row.username else [], plan)
+        if problem:
+            row.errors.append(problem)  # the row is skipped
+            continue
+        _decide(row, user, plan)
     ignored = sum(row.values.pop("password", None) is not None for row in plan.rows if row.existing)
     if ignored:
         plan.warnings.append(f"Passwords were ignored for {ignored} existing user{'s' if ignored > 1 else ''}: "
@@ -241,15 +245,38 @@ EXISTING_SQL = (
 )
 
 
-def _existing_users(db: Db, usernames: list[str], lock: bool) -> dict[str, dict]:
-    found: dict[str, dict] = {}
+def _existing_users(db: Db, usernames: list[str], lock: bool) -> dict[str, list[dict]]:
+    """Accounts by username. More than one per username = students who share it
+    (brothers and sisters, migration 0024)."""
+    found: dict[str, list[dict]] = {}
     unique = sorted(set(usernames), key=fold)  # stable lock order
     for i in range(0, len(unique), _CHUNK):
         part = unique[i:i + _CHUNK]
         sql = EXISTING_SQL + f"WHERE u.org_id = %s AND u.username IN ({', '.join(['%s'] * len(part))})"
         for user in db.all(sql + (" FOR UPDATE" if lock else ""), [db.org, *part]):
-            found[fold(user["username"])] = user
+            found.setdefault(fold(user["username"]), []).append(user)
     return found
+
+
+def _account_for(row: RowPlan, users: list[dict], plan: Plan) -> tuple[dict | None, str | None]:
+    """The existing account a row is about, as (account, problem). One account
+    with the username (or none): that one, as always. Several students share it:
+    the one in the section being imported; a file cannot say which child it
+    means otherwise, and it never adds a brother or sister."""
+    if len(users) <= 1:
+        return (users[0] if users else None), None
+    if plan.user_type != "student":
+        return users[0], None  # reported as "already used by a student account"
+    here = [u for u in users if u["user_type"] == "student" and u["section_id"] == plan.section["section_id"]]
+    if len(here) == 1:
+        return here[0], None
+    names = ", ".join(f"{u['full_name']} ({place(u['class_name'], u['section_name'])})" for u in users[:5])
+    if here:
+        return None, (f"Username '{row.username}' is shared by {len(here)} students of this section "
+                      f"({', '.join(u['full_name'] for u in here[:5])}), so the file cannot say which one this "
+                      "row is. Edit them on their own pages.")
+    return None, (f"Username '{row.username}' is shared by brothers and sisters in other classes: {names}. "
+                  "To add another child with this username use 'Add student' in the section, not the import.")
 
 
 def place(class_name: str | None, section_name: str | None) -> str:

@@ -9,7 +9,7 @@ from app.core.security import hash_password
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.users import PasswordSet, StaffCreate, StaffUpdate, TeacherInfoUpdate
-from app.services import access, audit, leaving, pagination, storage
+from app.services import access, audit, leaving, pagination, siblings, storage
 from app.services import auth as auth_service
 
 ONLY_ADMIN_CREATES = "Only admin can create admin/principal/sub-admin accounts"
@@ -29,6 +29,7 @@ def create_staff(db: Db, actor: CurrentUser, body: StaffCreate) -> dict:
     if body.user_type in ADMIN_MANAGED and actor.user_type != "admin":
         raise Forbidden(ONLY_ADMIN_CREATES)
     with db.transaction():
+        siblings.lock_school(db)  # one account creation at a time per school (username rules, 0024)
         if body.user_type == "principal":
             ensure_no_other_principal(db)
         taken = leaving.username_taken(db, body.username)
@@ -42,7 +43,7 @@ def create_staff(db: Db, actor: CurrentUser, body: StaffCreate) -> dict:
                  body.email, body.phone, body.user_type),
             ).lastrowid
         except DuplicateKey as exc:
-            if exc.key in (None, "uq_users_org_username"):
+            if exc.key in (None, "uq_users_org_username", "uq_users_org_staff_username"):
                 raise Conflict("Username already exists") from None
             raise
         if body.user_type == "teacher":
