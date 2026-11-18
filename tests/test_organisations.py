@@ -155,6 +155,13 @@ class Filled:
                                         files={"file": ("g.png", _png(), "image/png")}), 201)["id"]
         _ok(c.put(f"/vehicles/{self.vehicle}/students/{self.student}", headers=a,
                   json={"stop_name": f"{mark} Stop", "pickup_time": "07:30"}))
+        # report-card designs + a print run waiting for marks (migration 0025)
+        self.design = post("/print-templates", {
+            "name": f"{mark} design", "layout": {"page": {}, "elements": [{"type": "text", "text": mark}]}})["id"]
+        self.print_batch = post("/print-batches", {
+            "source": "exam", "exam_id": self.exam, "class_id": self.cls, "front_template_id": self.design,
+            "title": f"{mark} print run", "pending": [{"student_id": self.student, "section_id": self.sec,
+                                                      "missing": [f"{mark} Maths"]}]})["id"]
 
 
 def _png() -> bytes:
@@ -331,6 +338,8 @@ def test_every_list_shows_only_the_own_school(client, schools):
             f"/students/{me.student}/attendance/overview", f"/students/{me.student}/transport",
             # brothers and sisters (migration 0024): both schools have a "student1", they are not siblings
             "/student/siblings",
+            # report-card designs + print runs (migration 0025)
+            f"/print-templates/{me.design}", f"/print-batches/{me.print_batch}", "/print-batches?status=all",
         ]
         seen_own = 0
         for role in (me.admin, me.t, me.s):
@@ -496,6 +505,23 @@ def test_ids_from_another_school_are_not_found(client, schools):
         # siblings (migration 0024): the same username in another school is nobody's brother or sister
         c.post("/auth/switch-sibling", headers=bearer(b.s), json={"student_id": a.student}),
         c.put(f"/students/{a.student}/username", headers=h, json={"username": "hijacked"}),
+        # report-card designs + print runs (migration 0025)
+        c.get(f"/print-templates/{a.design}", headers=h),
+        c.put(f"/print-templates/{a.design}", headers=h, json={"name": "x", "layout": {"elements": []}}),
+        c.delete(f"/print-templates/{a.design}", headers=h),
+        c.get(f"/print-batches/{a.print_batch}", headers=h),
+        c.put(f"/print-batches/{a.print_batch}", headers=h, json={"status": "done"}),
+        c.delete(f"/print-batches/{a.print_batch}", headers=h),
+        c.post("/print-batches", headers=h, json={"source": "exam", "exam_id": a.exam, "title": "x",
+                                                  "pending": [{"student_id": b.student}]}),
+        c.post("/print-batches", headers=h, json={"source": "final", "class_id": a.cls, "title": "x",
+                                                  "pending": [{"student_id": b.student}]}),
+        c.post("/print-batches", headers=h, json={"source": "final", "front_template_id": a.design, "title": "x",
+                                                  "pending": [{"student_id": b.student}]}),
+        c.post("/print-batches", headers=h, json={"source": "final", "title": "x",
+                                                  "pending": [{"student_id": a.student}]}),
+        c.post("/print-batches", headers=h, json={"source": "final", "title": "x",
+                                                  "pending": [{"student_id": b.student, "section_id": a.sec}]}),
     ]
     for r in blocked:
         assert r.status_code in (400, 403, 404), f"{r.request.method} {r.request.url}: {r.status_code} {r.text}"
@@ -510,6 +536,8 @@ def test_ids_from_another_school_are_not_found(client, schools):
     assert len(_ok(c.get("/timetable", headers=a_admin))) == 1
     assert _ok(c.get(f"/vehicles/{a.vehicle}/students", headers=a_admin))[0]["student_id"] == a.student
     assert _ok(c.get("/school", headers=a_admin))["director_name"] == f"{ALPHA} Director"
+    assert _ok(c.get(f"/print-templates/{a.design}", headers=a_admin))["name"] == f"{ALPHA} design"
+    assert _ok(c.get(f"/print-batches/{a.print_batch}", headers=a_admin))["status"] == "open"
 
 
 def test_per_school_unique_rules(client, schools):

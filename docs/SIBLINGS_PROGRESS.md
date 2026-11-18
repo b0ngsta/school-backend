@@ -30,7 +30,15 @@
     pre-existing errors (`__tests__/tracking.test.tsx`), nothing new; `eslint .` 0 errors, 397 warnings (as before).
   - NOT done: nothing was run on a phone (no APK build here); the web changes are the owner's (list in the
     final report and in backend `CLAUDE.md` → "Siblings" → Deploy).
-- Next step: owner reviews, runs on a device, makes the two web changes, commits.
+- **17 Nov 2026, session 3** — owner asked for the web changes too. **WEB DONE** (uncommitted, `shelfwatch-plus`):
+  new `src/components/SiblingUsername.jsx` (`sharedWith(err)`, `SiblingConfirm`, `ChangeUsernameModal`);
+  `src/pages/SectionPage.jsx` Add student: a 409 `username_shared` shows "already belongs to Anuj (Class 2 — A) …
+  brother / sister?" → resends with `sibling: true`; editing the username drops the question; a staff 409 shows the
+  message as before. `src/pages/StudentPage.jsx`: "App username" line in the header; managers get "👤 Username" →
+  `PUT /students/{id}/username` with the same confirmation (old server → "needs the latest server update").
+  Checked: `vite build` clean; eslint no-undef: only the 3 older `confirm()` lines; a throwaway vitest + jsdom test
+  (3 cases, mocked API, not added to the repo) passes. Not clicked through against a live API.
+- Next step: owner reviews, runs on a device and in the browser, commits, deploys API → web → Android.
 
 ## 1. Baselines measured before any change (16 Nov 2026)
 - Backend, **real MySQL 8.0.46**, Python 3.11: 278 tests → **275 pass, 3 fail (all pre-existing)**:

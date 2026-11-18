@@ -34,6 +34,7 @@ Revisions so far:
 | `0022_theme_gallery` | Additive: `organisations.theme_color / header_color / button_color` (the school's theme, `#RRGGBB` or NULL = the apps' own colours; set on School profile, sent with every token response) and `gallery_photos` (school photos uploaded by managers, seen by everyone of that school). |
 | `0023_live_tracking` | Additive: `vehicle_locations` (one row per vehicle: the newest point from the driver's phone + `watched_until`), `vehicle_location_history` (about one point a minute, purged after 7 days by the daily clean-up), `driver_tracking_tokens` (upload-only key for the phone's location service, ends with the sign-in) and `school_timings.tracking_before_minutes / tracking_after_minutes` (NULL = 120). |
 | `0024_sibling_usernames` | Additive, no row changed: `users.staff_username` (virtual: the username of every account except students) with UNIQUE `uq_users_org_staff_username (org_id, staff_username)`, plain index `ix_users_org_username`, and the old `uq_users_org_username` dropped, so brothers / sisters (student accounts of one school) may share a username. Downgrade stops while any username is shared and lists those accounts. |
+| `0025_print_templates` | Additive: `print_templates` (a school's report-card designs from the web app's Report Cards screen: front / back side, layout JSON, one default per side) and `print_batches` (report cards waiting to print: students skipped because some marks were neither entered nor marked absent). |
 
 **First upgrade of an existing database** (your TiDB):
 
