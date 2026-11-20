@@ -102,11 +102,14 @@ def _firebase_app():
     return _app
 
 
-def _message(token: str, type: str, title: str, body: str | None, data: dict):
+def _message(token: str, type: str, title: str, body: str | None, data: dict, for_user: int | None = None):
     from firebase_admin import messaging
 
     fcm_data = {"type": type, "route": str(data.get("route") or ""),
                 "params": json.dumps(data.get("params") or {})}
+    if for_user:
+        # whose message it is: a phone shared by brothers and sisters switches to that child on tap
+        fcm_data["for_user"] = str(for_user)
     if data.get("web_path"):
         fcm_data["web_path"] = str(data["web_path"])
     return messaging.Message(
@@ -132,14 +135,13 @@ def _send_push(payload: list[tuple[int, str, str, str | None, dict]]) -> None:
     db = Db(pool)
     try:
         placeholders = ",".join(["%s"] * len(user_ids))
-        rows = db.all(f"SELECT user_id, token FROM device_tokens WHERE user_id IN ({placeholders})", user_ids)
-        tokens_by_user: dict[int, list[str]] = {}
-        for r in rows:
-            tokens_by_user.setdefault(r["user_id"], []).append(r["token"])
-
-        outgoing = [(token, _message(token, kind, title, body, data))
-                    for user_id, kind, title, body, data in payload
-                    for token in tokens_by_user.get(user_id, ())]
+        # `accounts` > 1 = a phone shared by brothers and sisters (migration 0026)
+        rows = db.all(f"SELECT d.user_id, d.token, u.full_name, "
+                      f"(SELECT COUNT(*) FROM device_tokens x WHERE x.token = d.token) AS accounts "
+                      f"FROM device_tokens d JOIN users u ON u.id = d.user_id "
+                      f"WHERE d.user_id IN ({placeholders})", user_ids)
+        outgoing = [(token, _message(token, kind, title, body, data, for_user))
+                    for token, kind, title, body, data, for_user in shared_device_messages(payload, rows)]
         invalid: list[str] = []
         for start in range(0, len(outgoing), FCM_BATCH):
             chunk = outgoing[start:start + FCM_BATCH]
@@ -151,6 +153,34 @@ def _send_push(payload: list[tuple[int, str, str, str | None, dict]]) -> None:
             db.execute_many("DELETE FROM device_tokens WHERE token = %s", [(t,) for t in invalid])
     finally:
         db.close()
+
+
+def shared_device_messages(payload, rows) -> list[tuple]:
+    """(token, type, title, body, data, for_user) to send. A phone registered for one
+    account gets the message as it is. On a phone shared by brothers and sisters the
+    title starts with the child's first name ("Riya: New fee …"); when several of them
+    get the same message (a school notice), the phone shows it once with every name."""
+    by_user: dict[int, list[dict]] = {}
+    for r in rows:
+        by_user.setdefault(r["user_id"], []).append(r)
+    out: list[tuple] = []
+    merged: dict[tuple, int] = {}  # (token, type, title, body, route) -> index in out
+    for user_id, kind, title, body, data in payload:
+        for r in by_user.get(user_id, ()):
+            token = r["token"]
+            if int(r["accounts"] or 1) <= 1:
+                out.append((token, kind, title, body, data, None))
+                continue
+            name = first_name(r["full_name"])
+            key = (token, kind, title, body, json.dumps(data, sort_keys=True, default=str))
+            if key in merged:  # the same news for another child on this phone: one banner, both names
+                i = merged[key]
+                t, k, shown, b, d, who = out[i]
+                out[i] = (t, k, shown.replace(": ", f", {name}: ", 1), b, d, who)
+                continue
+            merged[key] = len(out)
+            out.append((token, kind, f"{name}: {title}", body, data, user_id))
+    return out
 
 
 # ------------------------------------------------------ silent (data) push

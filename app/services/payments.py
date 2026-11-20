@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import secrets
 
-from app.core.errors import NotFound
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.payments import TransactionCreate
-from app.services import audit, pagination
+from app.services import audit, leaving, pagination
 
 
 def new_reference() -> str:
@@ -56,10 +55,8 @@ def list_transactions(db: Db, page: pagination.Page | None = None) -> pagination
 
 def create_transaction(db: Db, actor: CurrentUser, body: TransactionCreate) -> dict:
     with db.transaction():
-        if body.student_id is not None and not db.one(
-            "SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'student'", (body.student_id, db.org)
-        ):
-            raise NotFound("Student not found")
+        if body.student_id is not None:
+            leaving.ensure_current_student(db, body.student_id, "record a payment")
         reference = new_reference()
         transaction_id = db.execute(
             "INSERT INTO transactions (org_id, reference, student_id, amount, method, status) "

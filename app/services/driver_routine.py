@@ -47,6 +47,13 @@ _STUDENT_JOINS = (
 
 # ------------------------------------------------------------------ shapes
 
+def _forget_tracking(db: Db) -> None:
+    """Bus tracking follows the drivers' shifts (services/live_tracking.py): forget its memory."""
+    from app.services import live_tracking
+
+    live_tracking.forget_schedule(db.org)
+
+
 def _vehicle_brief(v: dict) -> dict:
     return {k: v[k] for k in ("id", "vehicle_no", "vehicle_type", "route_name", "status", "capacity")}
 
@@ -242,6 +249,7 @@ def create_shift(db: Db, vehicle_id: int, body: ShiftCreate) -> dict:
         (db.org, vehicle_id, body.name.strip(), body.trip_type, body.start_time, body.end_time,
          ",".join(map(str, body.weekdays)), int(body.is_active)),
     ).lastrowid
+    _forget_tracking(db)
     return {"id": shift_id}
 
 
@@ -260,6 +268,7 @@ def update_shift(db: Db, vehicle_id: int, shift_id: int, body: ShiftUpdate) -> d
              weekdays if isinstance(weekdays, str) else ",".join(map(str, weekdays)), int(bool(merged["is_active"])),
              shift_id, db.org),
         )
+    _forget_tracking(db)
     return {"updated": shift_id}
 
 
@@ -267,6 +276,7 @@ def delete_shift(db: Db, vehicle_id: int, shift_id: int) -> None:
     _vehicle(db, vehicle_id)
     _shift_row(db, vehicle_id, shift_id)
     db.execute("DELETE FROM transport_shifts WHERE id = %s AND org_id = %s", (shift_id, db.org))
+    _forget_tracking(db)
 
 
 def save_shift_students(db: Db, vehicle_id: int, shift_id: int, body: ShiftStudentsSave) -> dict:

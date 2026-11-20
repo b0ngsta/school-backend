@@ -80,6 +80,10 @@ def _ensure_section_in_class(db: Db, class_id: int | None, section_id: int | Non
 
 def create_student(db: Db, actor: CurrentUser, body: StudentCreate) -> dict:
     with db.transaction():
+        # Lock FIRST. Under REPEATABLE READ the first plain read fixes what this transaction sees; if it
+        # ran before the lock, a student added by a request at the same moment (double click) would stay
+        # invisible to the username check below and both would be saved as "siblings" unasked.
+        siblings.lock_school(db)
         access.ensure_can_edit_students(db, actor, body.class_id, body.section_id)
         _ensure_section_in_class(db, body.class_id, body.section_id)
         # free, or shared with brothers / sisters when the request confirms it (services/siblings.py)
@@ -294,6 +298,7 @@ def add_remark(db: Db, user: CurrentUser, student_id: int, body: RemarkCreate) -
     if not remark:
         raise BadRequest("Remark is required")
     with db.transaction():
+        leaving.ensure_current_student(db, student_id, "add a remark")
         remark_id = db.execute(
             "INSERT INTO student_remarks (student_id, remark, created_by) VALUES (%s, %s, %s)",
             (student_id, remark, user.id),

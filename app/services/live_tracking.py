@@ -41,10 +41,10 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 from app.core.clock import SCHOOL_TZ, school_now, utcnow
-from app.core.errors import NotFound, TooManyRequests, Unauthorized
+from app.core.errors import BadRequest, NotFound, TooManyRequests, Unauthorized
 from app.db import Db, pool
-from app.models.live_tracking import LocationBatch
-from app.services import features, notify, school_timings
+from app.models.live_tracking import LocationBatch, TrackingMinutes
+from app.services import audit, features, notify, school_timings
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +87,7 @@ _schedules: dict[int, tuple[float, date, Schedule]] = {}
 _driver_vehicles: dict[int, tuple[float, list[dict]]] = {}
 _student_vehicle: dict[int, tuple[float, dict | None]] = {}
 _locations: dict[int, tuple[float, dict | None]] = {}
+_plans: dict[int, tuple[float, int, DriverPlan]] = {}  # driver_id -> (when, org_id, plan)
 _watch_written: dict[int, float] = {}
 _watchers: dict[int, dict[int, float]] = {}
 _uploads: dict[int, list[float]] = {}
@@ -98,7 +99,8 @@ RATE_MAX = 20               # uploads per driver per minute (the fast rate needs
 
 def reset_caches() -> None:
     """Forget everything remembered in this process (tests; a settings change clears its own school)."""
-    for memory in (_schedules, _driver_vehicles, _student_vehicle, _locations, _watch_written, _watchers, _uploads):
+    for memory in (_schedules, _driver_vehicles, _student_vehicle, _locations, _watch_written, _watchers, _uploads,
+                   _plans):
         memory.clear()
 
 
@@ -173,34 +175,137 @@ def schedule(db: Db, org_id: int) -> Schedule:
 
 
 def forget_schedule(org_id: int) -> None:
-    """The school changed its timings or holidays."""
+    """The school changed its timings, holidays, a driver's shifts or minutes."""
     _schedules.pop(org_id, None)
+    for driver_id in [d for d, (_, org, _plan) in list(_plans.items()) if org == org_id]:
+        _plans.pop(driver_id, None)
+
+
+# ------------------------------------------- per driver, around each shift (0027)
+# A driver with active shifts (transport_shifts of their vehicles) shares the location from
+# `before` minutes before each shift until `after` minutes after it; windows that overlap
+# merge. `before` / `after` = the driver's own minutes (driver_tracking_settings), else the
+# school's default (school_timings.tracking_*_minutes). A driver without shifts keeps the
+# school's two windows, exactly as before. Holidays: no window either way.
+
+@dataclass(frozen=True)
+class ShiftSpan:
+    trip: str                 # pickup | drop
+    start: int                # minutes after midnight
+    end: int
+    weekdays: frozenset[int]  # Mon=0 … Sun=6
+
+
+@dataclass(frozen=True)
+class DriverPlan:
+    spans: tuple[ShiftSpan, ...]    # empty = the school's windows
+    before: int
+    after: int
+    own_before: int | None = None
+    own_after: int | None = None
+
+    def windows_on(self, weekday: int) -> tuple[Window, ...]:
+        raw = sorted(
+            (Window("morning" if s.trip == "pickup" else "afternoon", max(0, s.start - self.before),
+                    min(24 * 60 - 1, s.end + self.after))
+             for s in self.spans if weekday in s.weekdays),
+            key=lambda w: (w.start, w.end))
+        merged: list[Window] = []
+        for w in raw:
+            if merged and w.start <= merged[-1].end:
+                last = merged[-1]
+                merged[-1] = Window(last.kind, last.start, max(last.end, w.end))
+            else:
+                merged.append(w)
+        return tuple(merged)
+
+
+def _mins(value) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, timedelta):
+        return int(value.total_seconds()) // 60 % (24 * 60)
+    if hasattr(value, "hour"):
+        return value.hour * 60 + value.minute
+    return school_timings._minutes(str(value)[:5])
+
+
+def _plans_for(db: Db, pairs: list[tuple[int, int]], timings: dict[int, dict | None]) -> dict[int, DriverPlan]:
+    """Plans of (org_id, driver_id) pairs, any schools: 2 queries. `timings` = school_timings rows by org."""
+    if not pairs:
+        return {}
+    ids = sorted({d for _, d in pairs})
+    marks = ", ".join(["%s"] * len(ids))
+    spans: dict[int, list[ShiftSpan]] = {}
+    for r in db.all(
+        "SELECT v.driver_id, ts.trip_type, ts.start_time, ts.end_time, ts.weekdays FROM vehicles v "
+        "JOIN transport_shifts ts ON ts.vehicle_id = v.id AND ts.org_id = v.org_id "
+        f"WHERE v.driver_id IN ({marks}) AND ts.is_active = 1", ids):
+        start, end = _mins(r["start_time"]), _mins(r["end_time"])
+        if start is None or end is None or end <= start:
+            continue
+        days = frozenset(int(d) for d in str(r["weekdays"] or "").split(",") if d.strip().isdigit())
+        spans.setdefault(r["driver_id"], []).append(ShiftSpan(r["trip_type"], start, end, days))
+    own = {r["driver_id"]: r for r in db.all(
+        f"SELECT driver_id, before_minutes, after_minutes FROM driver_tracking_settings WHERE driver_id IN ({marks})",
+        ids)}
+    out = {}
+    for org_id, driver_id in pairs:
+        row = timings.get(org_id) or {}
+        mine = own.get(driver_id) or {}
+        ob, oa = mine.get("before_minutes"), mine.get("after_minutes")
+        out[driver_id] = DriverPlan(
+            spans=tuple(sorted(spans.get(driver_id, ()), key=lambda s: (s.start, s.end))),
+            before=_minutes_setting(row.get("tracking_before_minutes")) if ob is None else int(ob),
+            after=_minutes_setting(row.get("tracking_after_minutes")) if oa is None else int(oa),
+            own_before=ob, own_after=oa)
+    return out
+
+
+def driver_plan(db: Db, org_id: int, driver_id: int | None) -> DriverPlan | None:
+    """The driver's plan (remembered for a minute); None for no driver."""
+    if not driver_id:
+        return None
+    hit = _plans.get(driver_id)
+    if hit and hit[1] == org_id and clock.monotonic() - hit[0] < _SCHEDULE_TTL:
+        return hit[2]
+    plan = _plans_for(db, [(org_id, driver_id)], {org_id: _timings_row(db, org_id)})[driver_id]
+    _plans[driver_id] = (clock.monotonic(), org_id, plan)
+    return plan
+
+
+def _day_windows(sched: Schedule, plan: DriverPlan | None, day: date) -> tuple[Window, ...]:
+    """The windows of one day (holidays are the caller's business)."""
+    if plan is not None and plan.spans:
+        return plan.windows_on(day.weekday())
+    return () if day.weekday() == SUNDAY else sched.windows
 
 
 def _at(day: date, minutes: int) -> datetime:
     return datetime(day.year, day.month, day.day, minutes // 60, minutes % 60, tzinfo=SCHOOL_TZ)
 
 
-def current_window(sched: Schedule, now: datetime) -> Window | None:
+def current_window(sched: Schedule, now: datetime, plan: DriverPlan | None = None) -> Window | None:
     """The window running at `now` (school time), or None."""
-    if now.weekday() == SUNDAY or sched.holiday:
+    if sched.holiday:
         return None
     minute = now.hour * 60 + now.minute
-    return next((w for w in sched.windows if w.start <= minute < w.end), None)
+    return next((w for w in _day_windows(sched, plan, now.date()) if w.start <= minute < w.end), None)
 
 
-def upcoming(db: Db, org_id: int, sched: Schedule, now: datetime, days: int = 7) -> list[dict]:
+def upcoming(db: Db, org_id: int, sched: Schedule, now: datetime, days: int = 7,
+             plan: DriverPlan | None = None) -> list[dict]:
     """The windows still to come (today's running one included), holidays and
-    Sundays left out. The driver's phone sets its own alarms from this."""
+    Sundays (school windows) left out. The driver's phone sets its own alarms from this."""
     last = now.date() + timedelta(days=days - 1)
     holidays = {r["date"] for r in db.all(
         "SELECT date FROM holidays WHERE org_id = %s AND date BETWEEN %s AND %s", (org_id, now.date(), last))}
     out = []
     for offset in range(days):
         day = now.date() + timedelta(days=offset)
-        if day.weekday() == SUNDAY or day in holidays:
+        if day in holidays:
             continue
-        for w in sched.windows:
+        for w in _day_windows(sched, plan, day):
             start, end = _at(day, w.start), _at(day, w.end)
             if end > now:
                 out.append({"kind": w.kind, "trip": w.trip, "start_at": start.isoformat(timespec="seconds"),
@@ -208,15 +313,16 @@ def upcoming(db: Db, org_id: int, sched: Schedule, now: datetime, days: int = 7)
     return out
 
 
-def _window_state(db: Db, org_id: int, now: datetime | None = None) -> tuple[Window | None, dict]:
-    """(running window, what clients are told about it)."""
+def _window_state(db: Db, org_id: int, now: datetime | None = None,
+                  plan: DriverPlan | None = None) -> tuple[Window | None, dict]:
+    """(running window, what clients are told about it) for a driver's plan, or the school's windows."""
     now = now or school_now()
     sched = schedule(db, org_id)
-    window = current_window(sched, now)
+    window = current_window(sched, now, plan)
     if window:
         return window, {"active": True, "kind": window.kind, "trip": window.trip,
                         "ends_at": _at(now.date(), window.end).isoformat(timespec="seconds"), "next_start": None}
-    nxt = upcoming(db, org_id, sched, now)
+    nxt = upcoming(db, org_id, sched, now, plan=plan)
     return None, {"active": False, "kind": None, "trip": None, "ends_at": None,
                   "next_start": nxt[0]["start_at"] if nxt else None, "holiday": sched.holiday}
 
@@ -259,16 +365,20 @@ def config(db: Db, driver_id: int) -> dict:
     now = school_now()
     vehicles = _vehicles_of(db, driver_id)
     sched = schedule(db, db.org)
-    window, state = _window_state(db, db.org, now)
+    plan = driver_plan(db, db.org, driver_id)
+    window, state = _window_state(db, db.org, now, plan)
+    follows = bool(plan and plan.spans)
     return {
         "enabled": bool(vehicles),
         "vehicle": vehicles[0] if vehicles else None,
         "vehicles": vehicles,
         "active_now": bool(window and vehicles),
         "window": state,
-        "windows": [w.as_dict() for w in sched.windows],
+        # today's windows: around the driver's shifts when they have some, else the school's
+        "windows": [w.as_dict() for w in (_day_windows(sched, plan, now.date()) if follows else sched.windows)],
+        "follows_shifts": follows,
         "holiday": sched.holiday,
-        "upcoming": upcoming(db, db.org, sched, now) if vehicles else [],
+        "upcoming": upcoming(db, db.org, sched, now, plan=plan) if vehicles else [],
         "intervals": INTERVALS,
         "server_time": now.isoformat(timespec="seconds"),
     }
@@ -296,7 +406,7 @@ def report(db: Db, driver_id: int, body: LocationBatch) -> dict:
     """Store the driver's newest fix. Returns {interval_sec, watched, window, accepted}."""
     _check_rate(driver_id)
     vehicle = _driver_vehicle(db, driver_id, body.vehicle_id)
-    window, state = _window_state(db, db.org)
+    window, state = _window_state(db, db.org, plan=driver_plan(db, db.org, driver_id))
     if vehicle is None or window is None:
         wait = OUTSIDE_RECHECK_SEC
         if state.get("next_start"):
@@ -397,7 +507,8 @@ def live(db: Db, student_id: int) -> dict:
     base = {"server_time": now_school.isoformat(timespec="seconds"), "poll_sec": PARENT_POLL_SEC,
             "vehicle": None, "position": None, "age_sec": None, "last_seen_min": None, "moving": None}
     vehicle = _vehicle_of_student(db, student_id)
-    window, state = _window_state(db, db.org, now_school)
+    window, state = _window_state(db, db.org, now_school,
+                                  driver_plan(db, db.org, vehicle["driver_id"]) if vehicle else None)
     base["window"] = state
     if vehicle is None:
         return {**base, "state": "no_vehicle"}
@@ -445,6 +556,102 @@ def stop_watching(db: Db, student_id: int) -> dict:
     db.execute("UPDATE vehicle_locations SET watched_until = %s WHERE vehicle_id = %s AND org_id = %s "
                "AND watched_until > %s", (utcnow(), vehicle["id"], db.org, utcnow()))
     return {"stopped": True}
+
+
+# ----------------------------------------------------------------- managers
+
+MANAGER_POLL_SEC = 30        # the Transport list
+MAX_WATCHED = 50             # vehicles one map may watch at once
+
+
+def _plans_cached(db: Db, driver_ids: list[int]) -> dict[int, DriverPlan]:
+    """Plans of many drivers of this school: remembered ones first, the rest in one go."""
+    mono = clock.monotonic()
+    out, misses = {}, []
+    for driver_id in set(driver_ids):
+        hit = _plans.get(driver_id)
+        if hit and hit[1] == db.org and mono - hit[0] < _SCHEDULE_TTL:
+            out[driver_id] = hit[2]
+        else:
+            misses.append(driver_id)
+    if misses:
+        fresh = _plans_for(db, [(db.org, d) for d in misses], {db.org: _timings_row(db, db.org)})
+        for driver_id, plan in fresh.items():
+            _plans[driver_id] = (mono, db.org, plan)
+        out.update(fresh)
+    return out
+
+
+def fleet(db: Db, viewer_id: int, watch: set[int] | frozenset[int] = frozenset()) -> dict:
+    """GET /vehicles/live (managers): every vehicle of the school with its live state.
+    `watch` = vehicles shown on a map right now: their drivers switch to the fast rate,
+    like a parent watching. A fixed number of queries, whatever the number of vehicles."""
+    now_school = school_now()
+    now = utcnow()
+    vehicles = db.all(
+        "SELECT v.id, v.vehicle_no, v.vehicle_type, v.route_name, v.status, v.driver_id, v.driver_name, "
+        "u.full_name AS driver_account_name FROM vehicles v "
+        "LEFT JOIN users u ON u.id = v.driver_id AND u.org_id = v.org_id AND u.is_active = 1 "
+        "WHERE v.org_id = %s ORDER BY v.vehicle_no, v.id", (db.org,))
+    sched = schedule(db, db.org)
+    plans = _plans_cached(db, [v["driver_id"] for v in vehicles if v["driver_id"] and v["driver_account_name"]])
+    locations = {r["vehicle_id"]: r for r in db.all(
+        "SELECT vehicle_id, latitude, longitude, speed, heading, accuracy, recorded_at, watch_started_at "
+        "FROM vehicle_locations WHERE org_id = %s", (db.org,))} if vehicles else {}
+    today = now_school.date()
+    minute = now_school.hour * 60 + now_school.minute
+    out = []
+    for v in vehicles:
+        signed_in = bool(v["driver_id"] and v["driver_account_name"])
+        plan = plans.get(v["driver_id"]) if signed_in else None
+        windows = () if sched.holiday or not signed_in else _day_windows(sched, plan, today)
+        window = next((w for w in windows if w.start <= minute < w.end), None)
+        row = locations.get(v["id"])
+        item = {
+            "id": v["id"], "vehicle_no": v["vehicle_no"], "vehicle_type": v["vehicle_type"],
+            "route_name": v["route_name"], "status": v["status"],
+            "driver_name": v["driver_account_name"] or v["driver_name"],
+            "driver_id": v["driver_id"] if signed_in else None,
+            "follows_shifts": bool(plan and plan.spans),
+            "windows": [w.as_dict() for w in windows],
+            "window": None if window is None else {
+                **window.as_dict(), "ends_at": _at(today, window.end).isoformat(timespec="seconds")},
+            "last_seen_at": _iso_utc(row["recorded_at"]) if row and row["recorded_at"] else None,
+            "state": "inactive", "reason": None, "position": None, "age_sec": None, "last_seen_min": None,
+            "moving": None,
+        }
+        if not signed_in:
+            item["reason"] = "no_sign_in"
+        elif sched.holiday:
+            item["reason"] = "holiday"
+        elif window is None:
+            item["reason"] = "outside_window"
+        else:
+            window_start = _at(today, window.start).astimezone(UTC).replace(tzinfo=None)
+            if v["id"] in watch:
+                _watch(db, v, -viewer_id)   # staff ids never clash with a student's watch
+            if not row or not row["recorded_at"] or row["recorded_at"] < window_start:
+                item["reason"] = "no_data"   # nothing from the phone in this window yet
+            else:
+                age = max(0, int((now - row["recorded_at"]).total_seconds()))
+                boosted = bool(row["watch_started_at"]) and \
+                    (now - row["watch_started_at"]).total_seconds() > BOOST_SETTLE_SECONDS
+                speed = None if row["speed"] is None else float(row["speed"])
+                item.update({
+                    "state": "live" if age <= (LIVE_SECONDS_WATCHED if boosted else LIVE_SECONDS_BASELINE)
+                    else "stale",
+                    "position": {"latitude": float(row["latitude"]), "longitude": float(row["longitude"]),
+                                 "heading": None if row["heading"] is None else float(row["heading"]),
+                                 "speed": speed,
+                                 "accuracy": None if row["accuracy"] is None else float(row["accuracy"]),
+                                 "recorded_at": _iso_utc(row["recorded_at"])},
+                    "age_sec": age, "last_seen_min": age // 60,
+                    "moving": None if speed is None else speed >= MOVING_SPEED,
+                })
+        out.append(item)
+    return {"server_time": now_school.isoformat(timespec="seconds"), "holiday": sched.holiday,
+            "poll_sec": PARENT_POLL_SEC if watch else MANAGER_POLL_SEC,
+            "live": sum(1 for i in out if i["state"] == "live"), "vehicles": out}
 
 
 # --------------------------------------------------------- tracking tokens
@@ -530,8 +737,6 @@ def announce_window_starts(db: Db, now: datetime | None = None) -> int:
     import json
 
     now = now or school_now()
-    if now.weekday() == SUNDAY:
-        return 0
     today, minute = now.date(), now.hour * 60 + now.minute
     drivers: dict[int, list[int]] = {}
     for r in db.all("SELECT DISTINCT v.org_id, v.driver_id FROM vehicles v JOIN users u ON u.id = v.driver_id "
@@ -549,19 +754,95 @@ def announce_window_starts(db: Db, now: datetime | None = None) -> int:
         timings.setdefault(r["org_id"], r)
     closed = {r["org_id"] for r in db.all(
         f"SELECT org_id FROM holidays WHERE date = %s AND org_id IN ({marks})", (today, *drivers))}
+    open_orgs = {org_id: ids for org_id, ids in drivers.items()
+                 if org_id not in closed and features.for_org(db, org_id).get(FEATURE, True)}
+    plans = _plans_for(db, [(org_id, d) for org_id, ids in open_orgs.items() for d in ids], timings)
+
+    def starting(w: Window) -> bool:
+        return w.start <= minute < min(w.end, w.start + _START_GRACE_MINUTES)
+
+    def once(name: str) -> bool:
+        return bool(db.execute("INSERT IGNORE INTO scheduled_runs (name, last_run_at) VALUES (%s, %s)",
+                               (name, utcnow())).rowcount)
+
     told = 0
-    for org_id, driver_ids in drivers.items():
-        if org_id in closed or not features.for_org(db, org_id).get(FEATURE, True):
+    for org_id, driver_ids in open_orgs.items():
+        # drivers with shifts: their own windows, around each shift
+        school_drivers = []
+        for driver_id in driver_ids:
+            plan = plans.get(driver_id)
+            if not (plan and plan.spans):
+                school_drivers.append(driver_id)
+                continue
+            for w in plan.windows_on(today.weekday()):
+                if starting(w) and once(f"tracking:{org_id}:{today:%Y%m%d}:d{driver_id}:{w.start}"):
+                    notify.send_data(db, [driver_id], {"type": "tracking", "action": "start", "kind": w.kind})
+                    told += 1
+        # everybody else: the school's two windows, as before (never on Sundays)
+        if not school_drivers or today.weekday() == SUNDAY:
             continue
         for w in windows_from(timings.get(org_id)):
-            if not w.start <= minute < min(w.end, w.start + _START_GRACE_MINUTES):
-                continue
-            name = f"tracking:{org_id}:{today:%Y%m%d}:{w.kind}"
-            if db.execute("INSERT IGNORE INTO scheduled_runs (name, last_run_at) VALUES (%s, %s)",
-                          (name, utcnow())).rowcount:
-                notify.send_data(db, driver_ids, {"type": "tracking", "action": "start", "kind": w.kind})
-                told += len(driver_ids)
+            if starting(w) and once(f"tracking:{org_id}:{today:%Y%m%d}:{w.kind}"):
+                notify.send_data(db, school_drivers, {"type": "tracking", "action": "start", "kind": w.kind})
+                told += len(school_drivers)
     return told
+
+
+# ------------------------------------------------- managers: minutes per driver (0027)
+
+def _vehicle_for_settings(db: Db, vehicle_id: int) -> dict:
+    row = db.one("SELECT v.id, v.vehicle_no, v.driver_id, u.full_name AS driver_name FROM vehicles v "
+                 "LEFT JOIN users u ON u.id = v.driver_id WHERE v.id = %s AND v.org_id = %s", (vehicle_id, db.org))
+    if not row:
+        raise NotFound("Vehicle not found")
+    return row
+
+
+def vehicle_tracking(db: Db, vehicle_id: int) -> dict:
+    """GET /vehicles/{id}/tracking: when this vehicle's driver shares the location."""
+    vehicle = _vehicle_for_settings(db, vehicle_id)
+    row = _timings_row(db, db.org) or {}
+    school = {"before_minutes": _minutes_setting(row.get("tracking_before_minutes")),
+              "after_minutes": _minutes_setting(row.get("tracking_after_minutes"))}
+    now = school_now()
+    sched = schedule(db, db.org)
+    plan = driver_plan(db, db.org, vehicle["driver_id"])
+    follows = bool(plan and plan.spans)
+    return {
+        "vehicle_id": vehicle["id"],
+        "vehicle_no": vehicle["vehicle_no"],
+        "driver_id": vehicle["driver_id"],
+        "driver_name": vehicle["driver_name"],
+        "before_minutes": plan.own_before if plan else None,
+        "after_minutes": plan.own_after if plan else None,
+        "school": school,
+        "follows_shifts": follows,
+        "holiday": sched.holiday,
+        "windows": [w.as_dict() for w in (_day_windows(sched, plan, now.date()) if follows else sched.windows)],
+        "upcoming": upcoming(db, db.org, sched, now, plan=plan)[:10] if vehicle["driver_id"] else [],
+    }
+
+
+def set_vehicle_tracking(db: Db, vehicle_id: int, body: TrackingMinutes, actor) -> dict:
+    """PUT /vehicles/{id}/tracking: the driver's own minutes (null = the school's)."""
+    with db.transaction():
+        _save_minutes(db, vehicle_id, body, actor)
+    forget_schedule(db.org)
+    return vehicle_tracking(db, vehicle_id)
+
+
+def _save_minutes(db: Db, vehicle_id: int, body: TrackingMinutes, actor) -> None:
+    vehicle = _vehicle_for_settings(db, vehicle_id)
+    if not vehicle["driver_id"]:
+        raise BadRequest("Link a driver sign-in to this vehicle first.")
+    db.execute(
+        "INSERT INTO driver_tracking_settings (driver_id, org_id, before_minutes, after_minutes, updated_by) "
+        "VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE before_minutes = VALUES(before_minutes), "
+        "after_minutes = VALUES(after_minutes), updated_by = VALUES(updated_by)",
+        (vehicle["driver_id"], db.org, body.before_minutes, body.after_minutes, getattr(actor, "id", None)))
+    audit.record(db, actor, "driver_tracking.update", "user", vehicle["driver_id"],
+                 {"vehicle_id": vehicle_id, "before_minutes": body.before_minutes,
+                  "after_minutes": body.after_minutes})
 
 
 # ------------------------------------------------------------- clean-up hooks

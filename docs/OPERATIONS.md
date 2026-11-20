@@ -35,6 +35,9 @@ Revisions so far:
 | `0023_live_tracking` | Additive: `vehicle_locations` (one row per vehicle: the newest point from the driver's phone + `watched_until`), `vehicle_location_history` (about one point a minute, purged after 7 days by the daily clean-up), `driver_tracking_tokens` (upload-only key for the phone's location service, ends with the sign-in) and `school_timings.tracking_before_minutes / tracking_after_minutes` (NULL = 120). |
 | `0024_sibling_usernames` | Additive, no row changed: `users.staff_username` (virtual: the username of every account except students) with UNIQUE `uq_users_org_staff_username (org_id, staff_username)`, plain index `ix_users_org_username`, and the old `uq_users_org_username` dropped, so brothers / sisters (student accounts of one school) may share a username. Downgrade stops while any username is shared and lists those accounts. |
 | `0025_print_templates` | Additive: `print_templates` (a school's report-card designs from the web app's Report Cards screen: front / back side, layout JSON, one default per side) and `print_batches` (report cards waiting to print: students skipped because some marks were neither entered nor marked absent). |
+| `0026_sibling_devices` | `device_tokens` unique on (token, user_id): one phone can receive every sibling's pushes. |
+| `0027_driver_tracking` | Additive: `driver_tracking_settings` (minutes before / after each driver's shifts for live tracking). |
+| `0028_report_card_files` | Additive: `report_card_files` (report-card PDFs released to parents: the office uploads the class as one PDF saved from the print window, the server cuts it into one file per student; stored in `uploads/report-cards/`). |
 
 **First upgrade of an existing database** (your TiDB):
 

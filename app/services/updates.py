@@ -103,6 +103,9 @@ def _student(db: Db, uid: int) -> dict:
         "(SELECT MAX(r.updated_at) FROM exam_results r JOIN exams e ON e.id = r.exam_id "
         "  WHERE r.student_id = %(uid)s AND e.org_id = %(org)s AND e.results_published = 1) AS exams, "
         "(SELECT MAX(rc.created_at) FROM report_cards rc WHERE rc.student_id = %(uid)s) AS report_cards, "
+        # a report-card PDF released to the parent (0028)
+        "(SELECT MAX(rf.released_at) FROM report_card_files rf WHERE rf.student_id = %(uid)s "
+        "  AND rf.org_id = %(org)s) AS report_card_files, "
         # the session's final result was published for the child's section (0021)
         "(SELECT MAX(fr.published_at) FROM final_results fr JOIN student_profiles sp ON sp.section_id = fr.section_id "
         "  WHERE sp.user_id = %(uid)s AND fr.org_id = %(org)s) AS final_result, "
@@ -124,7 +127,7 @@ def _student(db: Db, uid: int) -> dict:
         "fees": _newest(row["fees"], row["fee_claims"], row["fee_claim_forms"]),
         "exams": _newest(row["exams"], row["final_result"]),
         # the Performance Report screen (Nov 2026) is built from published results too
-        "report_cards": _newest(row["report_cards"], row["exams"]),
+        "report_cards": _newest(row["report_cards"], row["exams"], row["report_card_files"]),
         "holidays": row["holidays"],
         "transport": row["transport"],
     }

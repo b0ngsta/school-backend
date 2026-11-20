@@ -21,3 +21,13 @@ class LocationBatch(BaseModel):
 
     points: list[LocationPoint] = Field(min_length=1, max_length=MAX_POINTS)
     vehicle_id: int | None = Field(default=None, description="Only for a driver with more than one vehicle")
+
+
+class TrackingMinutes(BaseModel):
+    """PUT /vehicles/{id}/tracking: the vehicle's driver's own minutes around each shift.
+    null = use the school's default (School timings)."""
+
+    before_minutes: int | None = Field(default=None, ge=0, le=240,
+                                       description="Start sharing this many minutes before each shift")
+    after_minutes: int | None = Field(default=None, ge=0, le=240,
+                                      description="Keep sharing this many minutes after each shift ends")

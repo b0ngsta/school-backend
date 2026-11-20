@@ -12,12 +12,17 @@
 
 	# Upload size caps (the app checks again, per file). Bulk import takes a
 	# CSV plus a photos ZIP (IMPORT_MAX_CSV_MB + IMPORT_MAX_ZIP_MB in the app);
-	# everything else is at most 15 MB per file.
+	# everything else is at most 15 MB per file, except a report-card release:
+	# one class saved as one PDF (the app allows 40 MB).
 	@bulk_import path /imports/users
 	request_body @bulk_import {
 		max_size 110MB
 	}
-	@everything_else not path /imports/users
+	@report_cards path /report-card-releases
+	request_body @report_cards {
+		max_size 45MB
+	}
+	@everything_else not path /imports/users /report-card-releases
 	request_body @everything_else {
 		max_size 20MB
 	}

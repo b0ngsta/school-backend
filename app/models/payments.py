@@ -7,6 +7,6 @@ from app.models.common import PaymentMethod
 
 class TransactionCreate(BaseModel):
     student_id: int | None = None
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=10_000_000)
     method: PaymentMethod
     status: Literal["success", "pending", "failed"] = "success"

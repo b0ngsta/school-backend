@@ -101,6 +101,22 @@ def png_bytes() -> bytes:
 PDF_BYTES = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
 
 
+def pdf_pages(count: int, width_pt: float = 595.28, height_pt: float = 841.89) -> bytes:
+    """A real PDF with `count` pages (A4 by default); page N shows the text "Page N"."""
+    import pikepdf
+
+    pdf = pikepdf.new()
+    font = pdf.make_indirect(pikepdf.Dictionary(Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1,
+                                                BaseFont=pikepdf.Name.Helvetica))
+    for n in range(1, count + 1):
+        page = pdf.add_blank_page(page_size=(width_pt, height_pt))
+        page.obj.Resources = pikepdf.Dictionary(Font=pikepdf.Dictionary(F1=font))
+        page.obj.Contents = pdf.make_stream(f"BT /F1 24 Tf 72 720 Td (Page {n}) Tj ET".encode())
+    out = BytesIO()
+    pdf.save(out)
+    return out.getvalue()
+
+
 # ------------------------------------------------------------ CAPTCHA-capable clients
 
 CAPTCHA_TEXT = "ABCDE"  # conftest makes every picture show this

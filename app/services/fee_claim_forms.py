@@ -120,13 +120,18 @@ def submit(
         raise BadRequest("The payment date can't be in the future")
     purpose = (purpose or "").strip()[:150]
     with db.transaction():
-        me = db.one("SELECT class_id, section_id FROM student_profiles WHERE user_id = %s AND org_id = %s",
-                    (student.id, db.org)) or {}
+        fee = None
         if fee_id is not None:
+            # Lock the fee FIRST. Under REPEATABLE READ the first plain read fixes what this transaction
+            # sees; if it ran before the lock, a form sent for this fee at the same moment (double tap)
+            # would stay invisible to the "already waiting" check below.
             fee = db.one("SELECT * FROM fees WHERE id = %s AND student_id = %s AND org_id = %s FOR UPDATE",
                          (fee_id, student.id, db.org))
             if not fee:
                 raise NotFound("Fee not found")
+        me = db.one("SELECT class_id, section_id FROM student_profiles WHERE user_id = %s AND org_id = %s",
+                    (student.id, db.org)) or {}
+        if fee is not None:
             if fee["status"] == "paid":
                 raise Conflict("This fee is already paid")
             if db.one("SELECT id FROM fee_claim_forms WHERE fee_id = %s AND (status = 'pending' "

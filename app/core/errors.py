@@ -126,6 +126,28 @@ def _integrity_error_handler(_: Request, exc: pymysql.err.IntegrityError) -> JSO
     return JSONResponse({"detail": "Invalid data"}, status_code=400)
 
 
+# MySQL "value does not fit the column" errors: too large a number (1264), too long a text (1406),
+# a value of the wrong kind (1366, 1292). The request asked for something the database can't store,
+# so it is the caller's input that is wrong: 422 with a plain message, never a 500.
+_DATA_ERROR_MESSAGES = {
+    1264: "A number is too large",
+    1406: "A text is too long",
+    1366: "A value is not valid",
+    1292: "A date or time is not valid",
+}
+
+
+def _data_error_handler(_: Request, exc: pymysql.err.DataError) -> JSONResponse:
+    code = exc.args[0] if exc.args else None
+    message = _DATA_ERROR_MESSAGES.get(code)
+    if message is None:
+        return _unhandled_error_handler(_, exc)
+    log.warning("Rejected a value the database can't store (MySQL %s): %s", code,
+                exc.args[1] if len(exc.args) > 1 else "")
+    return JSONResponse({"detail": f"{message}. Please check what you entered.", "code": "value_out_of_range"},
+                        status_code=422)
+
+
 def _unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
     from app.core.observability import report_exception
 
@@ -139,4 +161,5 @@ def _unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
 def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AppError, _app_error_handler)
     app.add_exception_handler(pymysql.err.IntegrityError, _integrity_error_handler)
+    app.add_exception_handler(pymysql.err.DataError, _data_error_handler)
     app.add_exception_handler(Exception, _unhandled_error_handler)

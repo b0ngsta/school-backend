@@ -18,6 +18,13 @@ _VEHICLE_COLUMNS = ("vehicle_no", "driver_name", "driver_phone", "route_name", "
                     "vehicle_type", "driver_id", "shift_name", "shift_start", "shift_end")
 
 
+def _forget_tracking(db: Db) -> None:
+    """Bus tracking follows the drivers' shifts (services/live_tracking.py): forget its memory."""
+    from app.services import live_tracking
+
+    live_tracking.forget_schedule(db.org)
+
+
 def _shape(row: dict | None) -> dict | None:
     return times.format_row(row, "shift_start", "shift_end", "pickup_time", "drop_time")
 
@@ -87,6 +94,7 @@ def create_vehicle(db: Db, body: VehicleCreate, actor: CurrentUser | None = None
             ).lastrowid
         except DuplicateKey:
             raise Conflict("Vehicle number already exists") from None
+    _forget_tracking(db)
     result = {"id": vehicle_id}
     if driver_created:
         result["driver_id"] = driver_created
@@ -123,6 +131,7 @@ def update_vehicle(db: Db, vehicle_id: int, body: VehicleUpdate, actor: CurrentU
             )
         except DuplicateKey:
             raise Conflict("Vehicle number already exists") from None
+    _forget_tracking(db)
     result = {"updated": vehicle_id}
     if driver_created:
         result["driver_id"] = driver_created
@@ -132,6 +141,7 @@ def update_vehicle(db: Db, vehicle_id: int, body: VehicleUpdate, actor: CurrentU
 def delete_vehicle(db: Db, vehicle_id: int) -> dict:
     if db.execute("DELETE FROM vehicles WHERE id = %s AND org_id = %s", (vehicle_id, db.org)).rowcount == 0:
         raise NotFound("Vehicle not found")
+    _forget_tracking(db)
     return {"deleted": vehicle_id}
 
 

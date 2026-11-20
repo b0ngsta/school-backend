@@ -8,7 +8,7 @@ from app.models.common import PaymentMethod
 class FeeCreate(BaseModel):
     student_id: int
     title: str = Field(min_length=1, max_length=100)
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=10_000_000)
     due_date: date | None = None
 
 

@@ -20,7 +20,7 @@ the same username. The same username in another school means nothing.
 """
 from __future__ import annotations
 
-from app.core.errors import Conflict, NotFound
+from app.core.errors import BadRequest, Conflict, NotFound
 from app.db import Db
 from app.models.auth import CurrentUser, TokenResponse
 from app.models.students import StudentUsername
@@ -66,7 +66,8 @@ def check_student_username(db: Db, username: str, *, sibling: bool = False,
     Free -> []. Held by a staff / driver account -> 409 as always. Held only by
     students -> 409 `username_shared` (the same message as before, plus who
     has it), unless `sibling` confirms that they are brothers and sisters: then
-    those students are returned."""
+    those students are returned. Callers take `lock_school(db)` as the FIRST statement of their
+    transaction: a plain read before the lock would hide a username saved at the same moment."""
     lock_school(db)
     holders = [h for h in db.all(_HOLDERS_SQL, (db.org, username, MAX_LISTED)) if h["id"] != exclude_id]
     if not holders:
@@ -77,6 +78,31 @@ def check_student_username(db: Db, username: str, *, sibling: bool = False,
     if sibling:
         return [_public(h) for h in holders]
     raise Conflict(_taken(holders[0]), extra={"code": SHARED, "siblings": [_public(h) for h in holders]})
+
+
+def username_check(db: Db, username: str, student_id: int | None = None) -> dict:
+    """GET /students/username-check: what saving `username` for a student would do.
+    Read-only (the save itself checks again under the school lock)."""
+    value = username.strip()
+    if len(value) < 3 or any(ch.isspace() for ch in value):
+        raise BadRequest("Username: at least 3 characters, no spaces")
+    if student_id is not None:
+        me = db.one("SELECT username FROM users WHERE id = %s AND org_id = %s AND user_type = 'student'",
+                    (student_id, db.org))
+        if not me:
+            raise NotFound("Student not found")
+        if me["username"] == value:
+            return {"username": value, "available": True, "current": True, "taken_by_staff": False, "shared_with": []}
+    holders = [h for h in db.all(_HOLDERS_SQL, (db.org, value, MAX_LISTED)) if h["id"] != student_id]
+    staff = any(h["user_type"] != "student" for h in holders)
+    return {
+        "username": value,
+        "available": not holders,
+        "current": False,
+        "taken_by_staff": staff,
+        # a staff account's name is not shown: the answer is just "pick another"
+        "shared_with": [] if staff else [_public(h) for h in holders],
+    }
 
 
 def rename_student(db: Db, actor: CurrentUser, student_id: int, body: StudentUsername) -> dict:
@@ -129,7 +155,8 @@ def switch(db: Db, user: CurrentUser, student_id: int) -> TokenResponse:
         if not target:
             raise NotFound("Student not found")
         sessions.revoke(db, user.session_id, "switch_sibling")
-        notifications.forget_session_devices(db, user.session_id)  # the phone registers again as the other child
         session = sessions.open_session(db, target["id"])
+        # the phone keeps getting every child's pushes (migration 0026); they now hang on the new sign-in
+        notifications.move_session_devices(db, user.session_id, session.session_id)
         audit.record(db, user, "auth.switch_sibling", "user", target["id"], {"from": user.id, "to": target["id"]})
     return auth_service.token_response(target, session, db)

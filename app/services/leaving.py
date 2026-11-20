@@ -42,6 +42,23 @@ def username_taken(db: Db, username: str) -> str | None:
     return USERNAME_TAKEN
 
 
+STUDENT_LEFT = "student_left"
+
+
+def ensure_current_student(db: Db, student_id: int, to_do: str) -> dict:
+    """The student's row; 404 when not a student of this school, 409 when they
+    left (`to_do` finishes the sentence, e.g. "add a fee"). Records about a
+    student who left stay readable; nothing new is added to them."""
+    row = db.one("SELECT id, full_name, is_active, left_on FROM users "
+                 "WHERE id = %s AND org_id = %s AND user_type = 'student'", (student_id, db.org))
+    if not row:
+        raise NotFound("Student not found")
+    if row["left_on"] is not None or not row["is_active"]:
+        raise Conflict(f"{row['full_name']} has left the school. Reactivate them first to {to_do}.",
+                       extra={"code": STUDENT_LEFT})
+    return row
+
+
 def _target(db: Db, user_id: int) -> dict:
     row = db.one(
         "SELECT id, username, full_name, user_type, is_active, left_on FROM users "

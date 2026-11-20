@@ -250,9 +250,13 @@ def test_switch_child(family, db):
     assert c.get("/auth/me", headers=bearer(anuj)).status_code == 401
     assert c.post("/auth/refresh", json={"refresh_token": anuj["refresh_token"]}).status_code == 401
     assert db.scalar("SELECT revoke_reason FROM auth_sessions WHERE user_id = %s", (family.anuj,)) == "switch_sibling"
-    assert db.scalar("SELECT COUNT(*) FROM device_tokens") == 0  # the phone registers again as Aman
+    # the phone keeps both children's pushes (migration 0026), now on Aman's sign-in
+    phone = db.all("SELECT user_id, session_id FROM device_tokens WHERE token = 'phone-token-1' ORDER BY user_id")
+    assert [r["user_id"] for r in phone] == sorted([family.anuj, family.aman])
+    assert {r["session_id"] for r in phone} == {db.scalar(
+        "SELECT id FROM auth_sessions WHERE user_id = %s AND revoked_at IS NULL", (family.aman,))}
     _ok(c.post("/devices", headers=bearer(aman), json={"token": "phone-token-1", "platform": "android"}), 204)
-    assert db.scalar("SELECT user_id FROM device_tokens WHERE token = 'phone-token-1'") == family.aman
+    assert db.scalar("SELECT COUNT(*) FROM device_tokens WHERE token = 'phone-token-1'") == 2
     audit = db.one("SELECT actor_id, entity_id, details FROM audit_logs WHERE action = 'auth.switch_sibling'")
     assert (audit["actor_id"], audit["entity_id"]) == (family.anuj, str(family.aman))
     assert f'"from": {family.anuj}' in audit["details"] and f'"to": {family.aman}' in audit["details"]

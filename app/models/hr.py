@@ -42,6 +42,6 @@ class SalaryCreate(BaseModel):
     user_id: int
     month: int = Field(ge=1, le=12)
     year: int = Field(ge=2000, le=2100)
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=10_000_000)
     status: str = Field(default="paid", pattern="^(paid|pending)$")
     note: str | None = Field(default=None, max_length=255)

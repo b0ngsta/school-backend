@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pytest
-from helpers import PDF_BYTES, bearer, client_from, login
+from helpers import PDF_BYTES, bearer, client_from, login, pdf_pages
 from test_password_reset import code_from, outbox  # noqa: F401 - fixture
 
 from app.core.clock import school_today
@@ -162,6 +162,12 @@ class Filled:
             "source": "exam", "exam_id": self.exam, "class_id": self.cls, "front_template_id": self.design,
             "title": f"{mark} print run", "pending": [{"student_id": self.student, "section_id": self.sec,
                                                       "missing": [f"{mark} Maths"]}]})["id"]
+        # a report-card PDF released to the parent (migration 0028)
+        released = _ok(c.post("/report-card-releases", headers=a, data={
+            "source": "exam", "exam_id": str(self.exam), "title": f"{mark} report card",
+            "students": f"[{self.student}]", "sides": "1"},
+            files={"file": ("class.pdf", pdf_pages(1), "application/pdf")}), 201)
+        self.report_file = released["files"][0]["id"]
 
 
 def _png() -> bytes:
@@ -320,6 +326,7 @@ def test_every_list_shows_only_the_own_school(client, schools):
             f"/fee-claim-forms/{me.claim_form}", f"/fee-claim-forms?section_id={me.sec}",
             f"/student/fee-claims/{me.claim_form}",
             f"/vehicles/{me.vehicle}/students",
+            f"/vehicles/{me.vehicle}/tracking",
             f"/events/{me.school_event}", "/events?status=upcoming",
             f"/student/notices/{me.notice}", "/student/remarks",
             f"/student/notices/{me.class_notice}", f"/student/class-announcements/{me.class_ann}",
@@ -338,8 +345,14 @@ def test_every_list_shows_only_the_own_school(client, schools):
             f"/students/{me.student}/attendance/overview", f"/students/{me.student}/transport",
             # brothers and sisters (migration 0024): both schools have a "student1", they are not siblings
             "/student/siblings",
+            # change username: the Verify button (task 5, 20 Nov 2026)
+            f"/students/username-check?username=student1&student_id={me.student}",
             # report-card designs + print runs (migration 0025)
             f"/print-templates/{me.design}", f"/print-batches/{me.print_batch}", "/print-batches?status=all",
+            # report-card PDFs released to parents (migration 0028)
+            f"/students/{me.student}/report-card-files", f"/report-card-files?exam_id={me.exam}",
+            # managers' live bus status: the other school's vehicle id in `watch` is ignored (task 8)
+            f"/vehicles/live?watch={me.vehicle},{other.vehicle}",
         ]
         seen_own = 0
         for role in (me.admin, me.t, me.s):
@@ -489,6 +502,8 @@ def test_ids_from_another_school_are_not_found(client, schools):
         c.put(f"/vehicles/{a.vehicle}/students/{b.student}", headers=h, json={}),
         c.put(f"/vehicles/{b.vehicle}/students/{a.student}", headers=h, json={}),
         c.delete(f"/vehicles/{a.vehicle}/students/{a.student}", headers=h),
+        c.get(f"/vehicles/{a.vehicle}/tracking", headers=h),
+        c.put(f"/vehicles/{a.vehicle}/tracking", headers=h, json={"before_minutes": 5}),
         c.put("/vehicles/" + str(b.vehicle), headers=h, json={"driver_id": a.teacher}),
         c.get(f"/student/notices/{a.notice}", headers=bearer(b.s)),
         c.get(f"/student/notices/{a.class_notice}", headers=bearer(b.s)),
@@ -505,6 +520,7 @@ def test_ids_from_another_school_are_not_found(client, schools):
         # siblings (migration 0024): the same username in another school is nobody's brother or sister
         c.post("/auth/switch-sibling", headers=bearer(b.s), json={"student_id": a.student}),
         c.put(f"/students/{a.student}/username", headers=h, json={"username": "hijacked"}),
+        c.get("/students/username-check", headers=h, params={"username": "anything", "student_id": a.student}),
         # report-card designs + print runs (migration 0025)
         c.get(f"/print-templates/{a.design}", headers=h),
         c.put(f"/print-templates/{a.design}", headers=h, json={"name": "x", "layout": {"elements": []}}),
@@ -522,6 +538,16 @@ def test_ids_from_another_school_are_not_found(client, schools):
                                                   "pending": [{"student_id": a.student}]}),
         c.post("/print-batches", headers=h, json={"source": "final", "title": "x",
                                                   "pending": [{"student_id": b.student, "section_id": a.sec}]}),
+        # report-card PDFs (migration 0028)
+        c.get(f"/students/{a.student}/report-card-files", headers=h),
+        c.delete(f"/report-card-files/{a.report_file}", headers=h),
+        c.delete("/report-card-releases", headers=h, params={"result_key": f"exam:{a.exam}"}),
+        c.post("/report-card-releases", headers=h, data={"source": "final", "title": "x",
+               "students": f"[{a.student}]", "sides": "1"},
+               files={"file": ("c.pdf", pdf_pages(1), "application/pdf")}),
+        c.post("/report-card-releases", headers=h, data={"source": "exam", "exam_id": str(a.exam), "title": "x",
+               "students": f"[{b.student}]", "sides": "1"},
+               files={"file": ("c.pdf", pdf_pages(1), "application/pdf")}),
     ]
     for r in blocked:
         assert r.status_code in (400, 403, 404), f"{r.request.method} {r.request.url}: {r.status_code} {r.text}"
@@ -538,6 +564,8 @@ def test_ids_from_another_school_are_not_found(client, schools):
     assert _ok(c.get("/school", headers=a_admin))["director_name"] == f"{ALPHA} Director"
     assert _ok(c.get(f"/print-templates/{a.design}", headers=a_admin))["name"] == f"{ALPHA} design"
     assert _ok(c.get(f"/print-batches/{a.print_batch}", headers=a_admin))["status"] == "open"
+    assert [f["id"] for f in _ok(c.get(f"/students/{a.student}/report-card-files", headers=a_admin))] == \
+        [a.report_file]
 
 
 def test_per_school_unique_rules(client, schools):

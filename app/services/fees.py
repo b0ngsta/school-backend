@@ -16,7 +16,7 @@ from app.core.errors import BadRequest, Conflict, NotFound
 from app.db import Db
 from app.models.auth import CurrentUser
 from app.models.fees import ClaimReview, FeeCreate, FeeGenerate
-from app.services import audit, notify, pagination, school_profile, storage
+from app.services import audit, leaving, notify, pagination, school_profile, storage
 from app.services.payments import new_reference
 
 # effective status exposes 'overdue' (pending + past due date) without storing it
@@ -249,6 +249,14 @@ def generate_class_fees(db: Db, actor: CurrentUser, body: FeeGenerate) -> dict:
             "WHERE sp.class_id = %s AND u.is_active = 1",
             (body.class_id,),
         )
+        # students who left this class during the current session are not billed (they are no longer
+        # in the class); the office sees how many, so nobody wonders why they got no fee
+        skipped_left = db.scalar(
+            "SELECT COUNT(*) FROM student_profiles sp JOIN users u ON u.id = sp.user_id "
+            "WHERE sp.org_id = %s AND (sp.class_id = %s OR sp.last_class_id = %s) "
+            "AND (u.is_active = 0 OR u.left_on IS NOT NULL) AND (u.left_on IS NULL OR u.left_on >= %s)",
+            (db.org, body.class_id, body.class_id, school_profile.current_session(db)["start"]),
+        )
         new_for = [r["user_id"] for r in db.all(
             "SELECT sp.user_id FROM student_profiles sp "
             "JOIN users u ON u.id = sp.user_id "
@@ -270,7 +278,8 @@ def generate_class_fees(db: Db, actor: CurrentUser, body: FeeGenerate) -> dict:
                          {"title": body.title, "created": created, "amount": amount,
                           "installment_id": installment_id})
             _notify_new_fee(db, new_for, body.title, amount, body.due_date)
-    out = {"created": created, "students": int(students or 0), "amount": float(amount)}
+    out = {"created": created, "students": int(students or 0), "amount": float(amount),
+           "skipped_left": int(skipped_left or 0)}
     if installment_id is not None:
         out["installment_id"] = installment_id
         out["plan"] = class_plan(db, body.class_id)
@@ -301,9 +310,7 @@ def list_fees(db: Db, status_filter: str | None, student_id: int | None,
 
 def create_fee(db: Db, actor: CurrentUser, body: FeeCreate) -> dict:
     with db.transaction():
-        if not db.one("SELECT id FROM users WHERE id = %s AND org_id = %s AND user_type = 'student'",
-                      (body.student_id, db.org)):
-            raise NotFound("Student not found")
+        leaving.ensure_current_student(db, body.student_id, "add a fee")
         fee_id = db.execute(
             "INSERT INTO fees (org_id, student_id, title, amount, due_date) VALUES (%s, %s, %s, %s, %s)",
             (db.org, body.student_id, body.title, body.amount, body.due_date),

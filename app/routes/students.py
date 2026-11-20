@@ -21,7 +21,7 @@ from app.models.students import (
     StudentUpdate,
     StudentUsername,
 )
-from app.services import final_results, leaving, siblings
+from app.services import final_results, leaving, report_card_files, siblings
 from app.services import students as student_service
 from app.services.pagination import Page
 
@@ -51,6 +51,20 @@ def list_students(
     db: Db = Depends(get_db),
 ):
     return paged(response, student_service.list_students(db, user, class_id, section_id, page, status, q))
+
+
+@router.get("/username-check")
+def username_check(
+    username: str = Query(..., min_length=1, max_length=50),
+    student_id: int | None = Query(None, description="The student being renamed (their own username counts as free)"),
+    user: CurrentUser = Depends(manager),
+    db: Db = Depends(get_db),
+):
+    """Is `username` free for a student of this school? The app's "Change username"
+    Verify button. `available`; `current` (it is already this student's); `taken_by_staff`
+    (a staff / driver account has it: pick another); `shared_with` (students who have it:
+    pick another, or confirm they are brothers / sisters and save with `sibling: true`)."""
+    return siblings.username_check(db, username, student_id)
 
 
 @router.get("/{student_id}")
@@ -185,6 +199,12 @@ def delete_remark(student_id: int, remark_id: int, user: CurrentUser = Depends(s
 @router.get("/{student_id}/report-cards")
 def list_report_cards(student_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
     return student_service.list_report_cards(db, user, student_id)
+
+
+@router.get("/{student_id}/report-card-files")
+def list_report_card_files(student_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """Report-card PDFs released to this student's parents."""
+    return report_card_files.student_files(db, user, student_id)
 
 
 @router.post("/{student_id}/report-cards", status_code=201)

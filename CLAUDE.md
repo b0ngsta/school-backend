@@ -246,3 +246,101 @@ Head migration is now `0025_print_templates` (additive; expected version changed
 - **Waiting to print** (owner's request): when some students' marks are neither entered nor marked absent, the office prints the others and the skipped students are saved as a print run. `GET /print-batches?status=open|done|all` (default open, newest first, ≤ 200) · `GET /{id}` (+ `exam_name`, `class_name`, `pending_count`, `created_by_name`) · `POST {source, exam_id?, class_id?, front_template_id?, back_template_id?, title, pending[1..1000], printed_count}` (`exam` needs `exam_id` → 400; every exam / class / design / student / section id is checked against the school → 404) · `PUT /{id} {pending?, printed_count?, status?}` (an empty `pending` closes it: `done`) · `DELETE /{id}`. Audited `print_batch.create/update/delete`.
 - Old tests changed on purpose: head version ×2; `test_organisations` Filled school saves a design + a print run (the GET sweep covers the lists; `/print-templates/{id}`, `/print-batches/{id}`, `?status=all` added) + cross-school GET / PUT / DELETE and POST with the other school's exam / class / design / student / section → 404. Checked on **real MySQL 8.0.46** (19 Nov 2026): 299 tests, 297 pass; the 2 failures also fail without this change (`test_mobile_parity` X-Total-Count, `test_security` 2560 px photo). Ruff clean. Also clicked through end to end (real API + web build in headless Chrome): designs saved, marks check flags missing marks (AB not flagged), 5 students printed front-back (10 pages), 2 kept waiting, then printed after the marks were fixed.
 - Deploy: API (runs 0025) → web. The web app works against an older API too (designs then stay in that browser and move to the server by themselves after the update; waiting runs made then stay in that browser).
+
+## Test & quality report (20 Nov 2026, no code changed)
+Full report: claude.ai project doc `claude/backend-test-report.md` (fixes listed there are NOT done yet; owner decides).
+Suite on MySQL 8.0.46: 299 tests, 297 pass (stale: `test_mobile_parity` X-Total-Count needs `?limit=`, `test_security` 2560 → 800 px;
+`test_live_tracking::test_windows_follow_the_school_timings` depends on the weekday). Main findings:
+- **Race pattern (REPEATABLE READ):** a plain `SELECT` after `FOR UPDATE` still sees the snapshot of the transaction's FIRST read.
+  Bugs: `create_student` (first reads, then `siblings.check_student_username` → duplicate username without `sibling`) and
+  `fee_claim_forms.submit` (2 pending forms for one fee). Fix = locking read (`FOR SHARE/UPDATE`) on the existence check, or lock first.
+- 500s: money fields without `le` (fees, transactions, salaries, class fee) and long TEXT bodies (notices); `DataError` not mapped.
+- Upgrade Pillow 12.3 → 13.0, python-multipart → ≥0.0.31, Starlette → ≥1.3.1 (FastAPI bump); `Image.open(formats=[…])`.
+- Left students: `/fees`, `/transactions`, remarks still accepted (work-plan task 2).
+- Indexes to add: attendance (section_id, date) [history 3.3× faster], (date, org_id, status), users (org_id, user_type, is_active),
+  fees (org_id, status, due_date), notices / transactions (org_id, created_at).
+- Clean: no N+1 (152 measurements), no cross-school write leak (every write route fuzzed with the other school's ids), no 500 in
+  role / junk-parameter / features-off fuzz, SQL f-strings carry no user input.
+
+## Left students + double submits + too-big values (20 Nov 2026, no migration) — `tests/test_left_and_double_submits.py` (5)
+Fixes from the test report (`claude/backend-test-report.md` items 1, 2, 3, 5).
+- **Nothing new for a student who left**: `leaving.ensure_current_student(db, id, "add a fee")` → 404 unknown /
+  409 `{code: "student_left", detail: "<Name> has left the school. Reactivate them first to <…>."}`. Used by
+  `POST /fees`, `POST /transactions` (when a student is given) and `POST /students/{id}/remarks`. Old fees of a
+  left student stay listed and can still be paid (`PUT /fees/{id}/pay`), unpaid etc. `POST /fees/generate` answers
+  `skipped_left` = students of that class (class_id or last_class_id) who left during the current session (additive;
+  web shows "N students who left the school this session were not billed").
+- **Double submit races fixed** (REPEATABLE READ: the first plain read fixes the snapshot, so a lock taken after it
+  doesn't make the later existence check see a row committed meanwhile): `create_student` now calls
+  `siblings.lock_school(db)` as its FIRST statement (two "Add student" at once → 201 + 409, no unasked siblings);
+  `fee_claim_forms.submit` locks the fee (`FOR UPDATE`) before any other read (two forms for one fee → 201 + 409).
+  Rule for new code: take the lock first, or make the existence check itself a locking read.
+- **Too-big values → 422, never 500**: `le=10_000_000` on FeeCreate / TransactionCreate / SalaryCreate amount and
+  ClassCreate `fee_amount` (same cap as FeeGenerate / ClassUpdate / claim forms). `core/errors.py` maps
+  `pymysql.err.DataError` 1264 / 1406 / 1366 / 1292 → 422 `{detail: "A text is too long. Please check what you
+  entered.", code: "value_out_of_range"}` (other DataErrors stay 500). Nothing that used to save is refused.
+- Suite on MySQL 8.0.46: 304 tests, 302 pass (the 2 known stale tests). Ruff clean.
+
+## Every sibling's pushes on a shared phone (migration 0026_sibling_devices, 20 Nov 2026) — `tests/test_sibling_devices.py` (5)
+Head migration is now `0026_sibling_devices` (expected version changed in `test_migrations` / `test_platform`).
+- `device_tokens`: unique `(token, user_id)` instead of `token` (`uq_device_token_user`; downgrade keeps the newest row per token).
+- `notifications.register_device` (`POST /devices`): registers the token for the user AND, for a student, their active
+  brothers / sisters (same username, `_family`, ≤ 10 accounts), all with the caller's `session_id`; rows of the token for
+  anybody else are deleted (another person signed in on this phone). Staff / single children: one row, as before.
+- `siblings.switch`: the phone's rows are kept and moved to the new session (`move_session_devices`) instead of forgotten.
+  Logout (`forget_session_devices`) and `DELETE /devices/{token}` remove every child's row for that phone;
+  `forget_user_devices` (logout-all, marked as left) also removes rows tied to that user's sessions (siblings on their phone).
+- `notify._send_push` → `shared_device_messages(payload, rows)`: on a token registered for > 1 account the title starts with
+  the child's first name ("Aman: New fee …"); the same message for several children on one phone is sent once
+  ("Anuj, Aman: Holiday tomorrow"); FCM data gets `for_user` (that child's id; the app switches to them on tap).
+  Single-account phones: unchanged message. The inbox rows are unchanged.
+- Old test changed on purpose: `test_siblings::test_switch_child` (the phone is no longer forgotten on switch).
+- Suite on MySQL 8.0.46: 309 tests, 307 pass (the 2 known stale). Deploy: API (runs 0026) → Android (tap-to-switch);
+  an older app already gets the pushes (registration is server-side) but a tap opens the screen for the child signed in.
+
+## Username check for the app (20 Nov 2026, no migration) — `tests/test_username_check.py` (2)
+- `GET /students/username-check?username=&student_id=` (MANAGERS; route declared before `/{student_id}`) →
+  `siblings.username_check`: `{username, available, current, taken_by_staff, shared_with: [{id, full_name, class_name,
+  section_name, left}]}`. Same username rule as the save (≥ 3 chars, no spaces → 400); `student_id` of another school /
+  not a student → 404; a staff holder is never named. Read-only: `PUT /students/{id}/username` checks again under the lock.
+- Org sweep + cross-school 404 added in `test_organisations.py`. Known flake (not new): `test_driver_routine::
+  test_only_drivers_can_open_the_routine` compares `server_time` of two responses and fails if they straddle a second.
+
+## Tracking per driver, following shifts (migration 0027_driver_tracking, 20 Nov 2026) — `tests/test_driver_tracking.py` (5)
+Head migration is now `0027_driver_tracking` (expected version changed in `test_migrations` / `test_platform`).
+- **Rule**: a driver with ACTIVE `transport_shifts` on their vehicles shares the location from `before` minutes before each shift start until `after` minutes after its end, on the shift's weekdays; overlapping windows merge (`DriverPlan.windows_on`, kind = morning for pickup / afternoon for drop, clipped to the day). `before` / `after` = the driver's own (`driver_tracking_settings`) else the school's `tracking_*_minutes` (NULL = 120). A driver WITHOUT shifts keeps the school's two windows exactly as before (Sundays off). The vehicle form's old single `shift_*` does NOT count. Holidays: off either way.
+- **Table** `driver_tracking_settings (driver_id PK → users CASCADE, org_id, before_minutes, after_minutes NULL = school, updated_by SET NULL, updated_at)`.
+- **Code** `services/live_tracking.py`: `ShiftSpan`, `DriverPlan`, `_plans_for(db, [(org, driver)], timings)` (2 queries, any schools), `driver_plan()` (remembered 60 s per process in `_plans`), `_day_windows(sched, plan, day)`; `current_window` / `upcoming` / `_window_state` take `plan`; used by `config` (+ `follows_shifts`, `windows` = today's), `report`, the parents' `live` (the bus's driver) and `announce_window_starts` (drivers with shifts: one push per driver window, `scheduled_runs` name `tracking:<org>:<date>:d<driver>:<start>`; the rest: the school windows, same names as before). `forget_schedule(org)` also drops that school's plans; called by vehicle create / update / delete and shift create / update / delete (`_forget_tracking`).
+- **Endpoints** (MANAGERS, `transport` feature): `GET /vehicles/{id}/tracking` → `{vehicle_id, vehicle_no, driver_id, driver_name, before_minutes, after_minutes (own, null = school), school {before_minutes, after_minutes}, follows_shifts, holiday, windows (today), upcoming (≤ 10)}` · `PUT /vehicles/{id}/tracking {before_minutes?, after_minutes?}` (0–240 or null; vehicle without a driver sign-in → 400; audit `driver_tracking.update`). In the org sweep + cross-school list.
+- Checked on real MySQL 8: 316 tests, 314 pass (the 2 known stale ones). Deploy: API (runs 0027) → web.
+
+## Managers' live bus status (20 Nov 2026, no migration) — `tests/test_fleet_live.py` (3)
+- `GET /vehicles/live?watch=1,2` (MANAGERS, `transport` feature, declared before `/{vehicle_id}` routes) → `live_tracking.fleet(db, viewer_id, watch)`: `{server_time, holiday, poll_sec (30; 9 when watching), live (count), vehicles: [{id, vehicle_no, vehicle_type, route_name, status, driver_name, driver_id (sign-in only), follows_shifts, windows (today), window (running + ends_at), last_seen_at, state live|stale|inactive, reason outside_window|no_data|no_sign_in|holiday, position (only live/stale = a point from THIS window), age_sec, last_seen_min, moving}]}`. Same live rule as parents (≤ 120 s, ≤ 90 s once boosted). Fixed queries: vehicles, locations, schedule (cached), plans (`_plans_cached`: cache first, misses in one `_plans_for`).
+- `watch` (≤ `MAX_WATCHED` 50; other schools' / junk ids ignored) calls `_watch(db, v, -viewer_id)` for vehicles inside their window → watched_until + boost push, exactly like a parent's poll; the watch ends 25 s after the map stops asking. Coordinates never logged.
+- In the org sweep (`/vehicles/live?watch=<own>,<other>`) and `test_features` GATED transport.
+
+
+## Report-card PDFs for parents (migration 0028_report_card_files, 20 Nov 2026) — `tests/test_report_card_files.py` (3)
+Head migration is now `0028_report_card_files` (additive; expected version changed in `test_migrations` / `test_platform`).
+The server has 1 GB RAM, so **nothing is rendered here**: the office prints the class in its browser as for paper, picks
+"Save as PDF" in the print window and uploads that ONE file; the server only cuts it up. `routes|services/report_card_files.py`.
+- **Table** `report_card_files` (org_id, student_id RESTRICT, `result_key` "exam:<id>" | "final:<session>", source, exam_id /
+  class_id / section_id / front_template_id / back_template_id SET NULL, session, title ≤ 160, file_path, file_size, pages,
+  released_by SET NULL, released_at); UNIQUE (org_id, student_id, result_key) = one file per student per result.
+- **`POST /report-card-releases`** (MANAGERS) multipart `source`, `exam_id?`, `title`, `students` (JSON list of student ids in
+  PRINT order), `sides` 1|2, `file`, `front_template_id?`, `back_template_id?`, `page_w_mm?`, `page_h_mm?`, `notify` (default true).
+  Upload spooled to a temp file (≤ `MAX_MB` 40, ≤ 400 students), opened with pikepdf: pages must equal students × sides (400 with
+  the counts in words), each page within 4 mm of the design size; then per student `pdf.pages.extend(src.pages[i*s:(i+1)*s])`
+  → `compress.shrink_pdf` → `store.put("report-cards/<hex>.pdf")`. The school's `organisations` row is locked first; a second
+  release of the same result replaces the student's file (old one deleted after commit) and says "updated". Parents get
+  `notify_each` type `report_card` `{route: "ReportCards", params: {report_card_id}}`. Audit `report_card.release`.
+  Errors: not a PDF / unreadable / encrypted → 415; exam / student / design of another school → 404; teacher / parent → 403.
+- `GET /report-card-releases` (one line per result: students, bytes, released_at) · `DELETE /report-card-releases?result_key=`
+  (take a whole release back) · `GET /report-card-files?exam_id=|session=|result_key=&class_id=` · `DELETE /report-card-files/{id}`
+  · staff `GET /students/{id}/report-card-files` (same view rule as the student's other records) · parents
+  `GET /student/report-card-files`. Rows go out with a signed `attachment_path` + `attachment_name` + `attachment_type: "pdf"`.
+- `/updates` student key `report_cards` also lights up with `report_card_files.released_at`.
+- **Caddyfile**: `/report-card-releases` gets its own 45 MB body limit (everything else stays 20 MB) — reload Caddy on deploy.
+- Measured (cloud workspace): Chrome "Save as PDF" of 40 students front + back with photo, logo, watermark = 3.4 MB → 81 KB per
+  student; splitting a class takes < 0.1 s and ~10 MB of RAM. The real designer output (no photos) was 48 KB per student.
+- Checked on MySQL 8.0.46: 322 tests, 320 pass (the 2 known stale). Org sweep + cross-school 404s added. Deploy: API → web → app.

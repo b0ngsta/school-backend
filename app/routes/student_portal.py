@@ -17,6 +17,7 @@ from app.services import (
     class_announcements,
     documents,
     performance,
+    report_card_files,
     siblings,
     student_attendance,
     transport,
@@ -68,6 +69,12 @@ def my_remarks(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
 @router.get("/report-cards")
 def my_report_cards(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
     return portal.report_cards(db, user.id)
+
+
+@router.get("/report-card-files")
+def my_report_card_files(user: CurrentUser = Depends(me), db: Db = Depends(get_db)):
+    """Report-card PDFs the school released (newest first)."""
+    return report_card_files.for_student(db, user.id)
 
 
 @router.get("/attendance", dependencies=[Depends(require_feature("attendance"))])
