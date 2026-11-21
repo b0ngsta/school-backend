@@ -3,11 +3,11 @@ uvicorn[standard]==0.34.0
 PyMySQL==1.1.1
 cryptography==50.0.2          # MySQL 8 caching_sha2_password over plain TCP (docker MySQL)
 pydantic==2.10.6
-python-multipart==0.0.20
+python-multipart==0.0.34
 python-dotenv==1.0.1
 PyJWT==2.15.1                 # access tokens
 argon2-cffi==25.1.0           # password hashing
-Pillow==12.3.0                # image validation / re-encoding
+Pillow==13.0.0                # image validation / re-encoding
 pikepdf==10.13.0.post1        # PDF compression on upload (services/compress.py); optional at runtime
 openpyxl==3.1.5               # Excel (.xlsx) templates and uploads (user import, exam results)
 tzdata==2026.5                # timezone data for zoneinfo in slim images

@@ -42,6 +42,8 @@ EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", 
 _MEDIA_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
                 ".webp": "image/webp", ".pdf": "application/pdf"}
 _PIL_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}
+# the only decoders Pillow may use on an upload (it never falls back to TIFF, GIF, BMP…)
+_OPEN_FORMATS = tuple(_PIL_FORMATS.values())
 
 _CHUNK = 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 60_000_000  # decompression-bomb guard (~60 MP)
@@ -127,7 +129,7 @@ def check_image(data: bytes) -> str | None:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as img:
+            with Image.open(io.BytesIO(data), formats=_OPEN_FORMATS) as img:
                 img.verify()
     except (UnidentifiedImageError, OSError, ValueError, SyntaxError,
             Image.DecompressionBombError, Image.DecompressionBombWarning):
@@ -211,7 +213,7 @@ def _reencode_image(data: bytes, content_type: str, subdir: str | None = None,
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as img:
+            with Image.open(io.BytesIO(data), formats=_OPEN_FORMATS) as img:
                 img.load()
                 img = ImageOps.exif_transpose(img)  # keep phone photos upright
                 limit = compress.max_dimension_for(subdir)

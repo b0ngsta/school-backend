@@ -344,3 +344,17 @@ The server has 1 GB RAM, so **nothing is rendered here**: the office prints the 
 - Measured (cloud workspace): Chrome "Save as PDF" of 40 students front + back with photo, logo, watermark = 3.4 MB → 81 KB per
   student; splitting a class takes < 0.1 s and ~10 MB of RAM. The real designer output (no photos) was 48 KB per student.
 - Checked on MySQL 8.0.46: 322 tests, 320 pass (the 2 known stale). Org sweep + cross-school 404s added. Deploy: API → web → app.
+
+## Security package upgrades, step 1 (21 Nov 2026, no migration)
+- `requirements.txt`: **Pillow 12.3.0 → 13.0.0**, **python-multipart 0.0.20 → 0.0.34** (published security fixes; see project doc
+  `claude/backend-test-report.md` item 4). FastAPI 0.115.8 / Starlette 0.45.3 unchanged (they accept python-multipart 0.0.34:
+  Starlette imports `python_multipart` first).
+- `services/storage.py`: both `Image.open` calls pass `formats=_OPEN_FORMATS` (JPEG, PNG, WEBP), so Pillow can never fall back to
+  another decoder (TIFF, GIF, BMP…) on an upload. Same behaviour for every valid upload.
+- Checked on MySQL 8.0.46: full suite before and after = 320 pass, the same 2 known stale tests fail (`test_mobile_parity`
+  X-Total-Count, `test_security` 2560 px). No Pillow deprecation warnings. Ruff 0.17 (newer than before) flags 5 F811 in
+  `tests/test_driver_tracking.py` / `test_fleet_live.py` (`at` fixture redefined) — older, not from this change.
+- Deploy: rebuild the API image (`pip install -r requirements.txt`). Rollback = the previous image.
+- **Step 2 still to do**: FastAPI + Starlette ≥ 1.3.1, as its own deploy. `app/main.py` already uses `lifespan` (no
+  `on_event`), so the main Starlette 1.x breaking change does not apply; Starlette is used directly only in `core/http.py`
+  (middleware types) and `services/storage.py` / `storage/base.py` (`Response`).
