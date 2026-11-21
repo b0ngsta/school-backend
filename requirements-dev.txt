@@ -1,5 +1,6 @@
 -r requirements.txt
 pytest==9.1.1
-httpx==0.28.1
+httpx==0.28.1                 # test_storage_s3 talks to moto with it
+httpx2==2.16.2                # Starlette 1.x TestClient uses it (httpx there is deprecated)
 moto[server]==5.2.3           # mock S3 for the storage tests
 ruff

@@ -355,6 +355,19 @@ The server has 1 GB RAM, so **nothing is rendered here**: the office prints the 
   X-Total-Count, `test_security` 2560 px). No Pillow deprecation warnings. Ruff 0.17 (newer than before) flags 5 F811 in
   `tests/test_driver_tracking.py` / `test_fleet_live.py` (`at` fixture redefined) — older, not from this change.
 - Deploy: rebuild the API image (`pip install -r requirements.txt`). Rollback = the previous image.
-- **Step 2 still to do**: FastAPI + Starlette ≥ 1.3.1, as its own deploy. `app/main.py` already uses `lifespan` (no
-  `on_event`), so the main Starlette 1.x breaking change does not apply; Starlette is used directly only in `core/http.py`
-  (middleware types) and `services/storage.py` / `storage/base.py` (`Response`).
+- **Step 2 done (21 Nov 2026)**: see the next section.
+
+## Security package upgrades, step 2 (21 Nov 2026, no migration, no app code change)
+- `requirements.txt`: **FastAPI 0.115.8 → 0.165.0**, **Starlette 0.45.3 → 1.10.0** (now pinned explicitly; FastAPI needs ≥ 1.6,
+  the security fixes ≥ 1.3.1). FastAPI 0.165 needs Python ≥ 3.11 (the image is `python:3.11-slim`) and pulls in
+  `opentelemetry-api` (no setup needed). Pydantic 2.10.6, uvicorn 0.34.0 unchanged; `pip check` clean.
+- `requirements-dev.txt`: + `httpx2==2.16.2` (Starlette 1.x's TestClient warns that httpx is deprecated there); `httpx` stays
+  (`test_storage_s3` uses it with moto).
+- Nothing in `app/` needed changing: `main.py` already uses `lifespan`, no `on_event`; Starlette is used directly only in
+  `core/http.py` and the storage `Response`s.
+- Checked on MySQL 8.0.46: full suite = 320 pass, the same 2 known stale tests fail (identical to before). App imports with
+  Starlette / FastAPI deprecation warnings turned into errors. Real server smoke test (uvicorn, fresh `alembic upgrade head`):
+  startup + job worker start, sign-in, photo upload (3000 px → stored), a fake image → 415, validation error → 422 with the
+  same `{"detail": [...]}` shape, CORS preflight. Plain (non-file) form fields are still capped at 1 MB each by Starlette
+  (same default as 0.45 → 400 "Part exceeded maximum size"); every form field in the app is a short text.
+- Deploy: rebuild the API image and restart; rollback = the previous image. Clients need nothing.
