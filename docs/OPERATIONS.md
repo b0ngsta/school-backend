@@ -38,6 +38,7 @@ Revisions so far:
 | `0026_sibling_devices` | `device_tokens` unique on (token, user_id): one phone can receive every sibling's pushes. |
 | `0027_driver_tracking` | Additive: `driver_tracking_settings` (minutes before / after each driver's shifts for live tracking). |
 | `0028_report_card_files` | Additive: `report_card_files` (report-card PDFs released to parents: the office uploads the class as one PDF saved from the print window, the server cuts it into one file per student; stored in `uploads/report-cards/`). |
+| `0029_driver_profiles` | Additive: `driver_profiles` (driver's licence number, filled by the HQ bulk school upload's drivers.xlsx). |
 
 **First upgrade of an existing database** (your TiDB):
 

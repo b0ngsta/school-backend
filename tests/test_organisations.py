@@ -353,6 +353,8 @@ def test_every_list_shows_only_the_own_school(client, schools):
             f"/students/{me.student}/report-card-files", f"/report-card-files?exam_id={me.exam}",
             # managers' live bus status: the other school's vehicle id in `watch` is ignored (task 8)
             f"/vehicles/live?watch={me.vehicle},{other.vehicle}",
+            # class teacher's "share login details" list (21 Nov 2026)
+            f"/students/login-status?section_id={me.sec}",
         ]
         seen_own = 0
         for role in (me.admin, me.t, me.s):
@@ -521,6 +523,9 @@ def test_ids_from_another_school_are_not_found(client, schools):
         c.post("/auth/switch-sibling", headers=bearer(b.s), json={"student_id": a.student}),
         c.put(f"/students/{a.student}/username", headers=h, json={"username": "hijacked"}),
         c.get("/students/username-check", headers=h, params={"username": "anything", "student_id": a.student}),
+        # "New password & share" (21 Nov 2026)
+        c.get(f"/students/login-status?section_id={a.sec}", headers=h),
+        c.post(f"/students/{a.student}/login-share", headers=h),
         # report-card designs + print runs (migration 0025)
         c.get(f"/print-templates/{a.design}", headers=h),
         c.put(f"/print-templates/{a.design}", headers=h, json={"name": "x", "layout": {"elements": []}}),

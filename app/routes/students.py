@@ -21,7 +21,7 @@ from app.models.students import (
     StudentUpdate,
     StudentUsername,
 )
-from app.services import final_results, leaving, report_card_files, siblings
+from app.services import final_results, leaving, login_share, report_card_files, siblings
 from app.services import students as student_service
 from app.services.pagination import Page
 
@@ -51,6 +51,14 @@ def list_students(
     db: Db = Depends(get_db),
 ):
     return paged(response, student_service.list_students(db, user, class_id, section_id, page, status, q))
+
+
+@router.get("/login-status")
+def login_status(section_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """The section's students for "share login details": username, `signed_in` (has an active
+    sign-in on a phone), `last_shared_at`, `siblings` (others with the same username).
+    The section's class teacher or managers (services/login_share.py)."""
+    return login_share.section_status(db, user, section_id)
 
 
 @router.get("/username-check")
@@ -217,3 +225,11 @@ def add_report_card(student_id: int, body: ReportCardCreate, user: CurrentUser =
 def delete_report_card(student_id: int, report_id: int, user: CurrentUser = Depends(staff),
                        db: Db = Depends(get_db)):
     return student_service.delete_report_card(db, user, student_id, report_id)
+
+
+@router.post("/{student_id}/login-share")
+def share_login(student_id: int, user: CurrentUser = Depends(staff), db: Db = Depends(get_db)):
+    """"New password & share": the student gets a new easy password (e.g. mango4821), returned
+    ONCE with `share_text` to send to the parent (WhatsApp…). Every sign-in of the student ends;
+    the parent chooses their own password after signing in. Class teacher or managers."""
+    return login_share.share(db, user, student_id)

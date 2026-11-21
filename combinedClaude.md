@@ -1,7 +1,7 @@
 # combinedClaude.md — Escolva (formerly EduManage / Vidya Nova), all 4 repos in one file
 
 **Same file in every repo** (`shelfwatch_sfa_ir_backend`, `shelfwatch-plus`, `ShelfwatchPlus`, `dashboard`).
-Last merged: **19 Nov 2026** · work plan added **20 Nov 2026** (tasks 1–2, 4–8, 10 done), from the four repo CLAUDE.md files.
+Last merged: **19 Nov 2026** · work plan added **20 Nov 2026** (tasks 1–2, 4–8, 10 done; task 13 added 21 Nov), from the four repo CLAUDE.md files.
 
 How to keep it current:
 - When a session changes something that matters across repos, update this file **and copy it to all four repos** so they stay identical.
@@ -99,8 +99,8 @@ ruff check .   # py311, line 120
 - Scripts: `scripts/seed_driver_routine.py`, `scripts/load_live_tracking.py` (throwaway school only).
 - Docs: `docs/ORGANISATIONS.md`, `AUTH.md`, `OPERATIONS.md` (migrations, jobs, retention, upload size), `FRONTEND_README.md`, `DPDP.md`, `SIBLINGS_PROGRESS.md`; deploy `DEPLOY.md`, `DEPLOY_ORACLE.md`.
 
-### 6.2 Migrations (head = `0028_report_card_files`)
-0009 organisations → 0010 platform_indexes → 0011 student_portal → 0012 driver_routine → 0013 keep_history → 0014 login_captcha → 0015 exam_subject_marks → 0016 durable_jobs → 0017 protect_records → 0018 class_notices → 0019 features → 0020 fee_claim_forms → 0021 nov_requests → 0022 theme_gallery → 0023 live_tracking → 0024 sibling_usernames → 0025 print_templates → 0026 sibling_devices → 0027 driver_tracking → **0028 report_card_files**. All additive (0024's downgrade stops while a username is shared).
+### 6.2 Migrations (head = `0029_driver_profiles`)
+0009 organisations → 0010 platform_indexes → 0011 student_portal → 0012 driver_routine → 0013 keep_history → 0014 login_captcha → 0015 exam_subject_marks → 0016 durable_jobs → 0017 protect_records → 0018 class_notices → 0019 features → 0020 fee_claim_forms → 0021 nov_requests → 0022 theme_gallery → 0023 live_tracking → 0024 sibling_usernames → 0025 print_templates → 0026 sibling_devices → 0027 driver_tracking → 0028 report_card_files → **0029 driver_profiles**. All additive (0024's downgrade stops while a username is shared).
 
 ### 6.3 Endpoint map
 - `/auth` (login, me (+`photo_path`, `features`), refresh, logout(-all), change/forgot/verify/reset, `/auth/captcha`, `/auth/switch-sibling`) · `/organisations/{code}` · `/platform/*` (§9)
@@ -308,6 +308,23 @@ Do one item per session if the allowance is tight; **save progress (tick + notes
     several per A4 with cut marks, front/back, photo, QR optional) and `transfer_certificate` (A4; TC no., dates, reason, conduct…,
     linked to "Mark as left"); ready-made presets; print one student or a whole class. 
 12. [ ] **HQ small items**: "N off" features badge + filter on the school list; job queue (pending / failed / oldest waiting) on System page.
+13. [~] **Bulk school upload from HQ** (added 21 Nov 2026, owner's design). A folder of Excel files fills a whole school:
+    `classes.xlsx`, `teachers.xlsx`, `drivers.xlsx`, `students/Class 5 - A.xlsx` (one per section; `LKG.xlsx` = no sections).
+    Owner's decisions: any bad file → nothing saved, the problems are listed; uploading again updates (classes keep
+    everything, get new sections / subjects); class teacher / subject assignments by hand; drivers don't create vehicles;
+    username empty = primary phone (staff: own phone); no passwords in sheets: staff get easy ones (shown once), students
+    none until the class teacher's "New password & share" (option B, nothing readable stored); siblings with the same
+    username → a card per child after the upload (yes = sibling, no = other username); email optional; licence no. kept;
+    class fee is NOT in classes.xlsx (moved to Fees). Timetable by Excel: discussed, later.
+    - [x] **Backend** DONE 21 Nov 2026 (migration `0029_driver_profiles`): `services/school_import/`, `/platform/.../bulk-import`
+      (+`/siblings`), `/platform/bulk-import/template[?school=]`, `services/login_share.py` (`GET /students/login-status`,
+      `POST /students/{id}/login-share`). 329 tests, 327 pass (2 known stale). 1,050 students upload < 1 s.
+    - [x] **Web: class fee moved to Fees** DONE 21 Nov 2026 (Fees → 🏷️ Class fees; Classes no longer asks for it). App unchanged.
+    - [ ] **HQ page** (dashboard): school → Bulk upload: template download, folder picker (send only .xlsx + `paths`;
+      Next Server Actions need a bigger `bodySizeLimit` or a route handler), check report grouped by file, Upload,
+      logins download (Excel), sibling cards. Generated admin password on "New school" too.
+    - [ ] **Share-login screens**: web SectionPage + app (class teacher): list from `/students/login-status`, "New password &
+      share" → copy / WhatsApp `share_text`, warning when `was_signed_in`.
 
 ### 12.3 Later (owner said: not now)
 - **Archive classes / sections / exams** (postponed 20 Nov). Owner's choices so far: archiving a class/section with current

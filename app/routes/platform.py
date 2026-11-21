@@ -20,17 +20,24 @@ the operator for the audit log.
     POST  /platform/organisations/{code}/users/{id}/sign-out   end every session of the user
     GET   /platform/activity                                   audit trail (?org=&action=&before_id=&limit=)
     GET   /platform/system                                     database + configuration health
+    GET   /platform/bulk-import/template?school=CODE           the bulk-upload folder as a .zip (empty / filled)
+    POST  /platform/organisations/{code}/bulk-import           check (dry_run) or upload a folder of Excel files
+    POST  /platform/organisations/{code}/bulk-import/siblings  add a student after the brother / sister check
 """
-from fastapi import APIRouter, Depends, Query, Response
+import base64
+
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 
 from app.core.features import CATALOGUE
 from app.db import Db
 from app.dependencies import get_db, platform_operator
 from app.models.common import UserType
 from app.models.organisations import OrganisationCreate, OrganisationUpdate
-from app.models.platform import FeaturesUpdate, PlatformPasswordReset
+from app.models.platform import CheckedStudentAdd, FeaturesUpdate, PlatformPasswordReset
 from app.models.school import SchoolProfileUpdate
 from app.services import features, organisations, platform
+from app.services.school_import import service as school_import
+from app.services.school_import import sheets as import_sheets
 
 router = APIRouter(prefix="/platform", tags=["platform"], dependencies=[Depends(platform_operator)])
 
@@ -136,3 +143,50 @@ def activity(
 @router.get("/system")
 def system(db: Db = Depends(get_db)):
     return platform.system_status(db)
+
+
+# ------------------------------------------------------ bulk school upload (21 Nov 2026)
+
+@router.get("/bulk-import/template")
+def bulk_import_template(school: str | None = Query(None, max_length=30, description="School code: fill with its data"),
+                         format: str = Query("zip", pattern="^(zip|json)$"), db: Db = Depends(get_db)):
+    """The folder to fill, as a .zip: classes.xlsx, teachers.xlsx, drivers.xlsx and
+    students/<Class - Section>.xlsx (each with a "How to fill" tab). With `school` the
+    sheets hold that school's current data, to edit and upload again.
+    `format=json` → {filename, mime, content_base64}."""
+    current, folder = None, "School"
+    if school:
+        org = school_import.bind_school(db, school)
+        current, folder = school_import.current_data(db), org["code"]
+    data = import_sheets.template_zip(current, folder)
+    filename = f"{folder}-bulk-upload.zip"
+    if format == "json":
+        return {"filename": filename, "mime": "application/zip", "content_base64": base64.b64encode(data).decode()}
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@router.post("/organisations/{code}/bulk-import")
+def bulk_import(code: str, files: list[UploadFile] = File(...), paths: str | None = Form(None),
+                dry_run: bool = Form(True), db: Db = Depends(get_db),
+                operator: str | None = Depends(platform_operator)):
+    """A whole school from a folder of Excel files (services/school_import/service.py).
+    `dry_run` (default) = the check: what would be saved and every problem, nothing saved.
+    `dry_run=false` = the upload: everything in one go, or nothing (400 `import_invalid` with
+    the same report when any file has a problem). The upload's answer has `logins`: the new
+    teachers' and drivers' usernames and passwords, shown only this once."""
+    school_import.bind_school(db, code)
+    uploads = school_import.read_uploads(files, paths)
+    if dry_run:
+        return school_import.check(db, uploads)
+    return school_import.apply(db, uploads, operator)
+
+
+@router.post("/organisations/{code}/bulk-import/siblings", status_code=201)
+def bulk_import_sibling(code: str, body: CheckedStudentAdd, db: Db = Depends(get_db),
+                        operator: str | None = Depends(platform_operator)):
+    """After the upload: add one student whose username another student has.
+    `sibling: true` = a brother / sister (they share the username); else `username`
+    = a free username to give them instead (409 `username_shared` if a student has it)."""
+    school_import.bind_school(db, code)
+    return school_import.add_checked_student(db, body.student, body.sibling, body.username, operator)
