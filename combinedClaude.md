@@ -97,6 +97,7 @@ ruff check .   # py311, line 120
 - `storage/` local or S3 (R2/OCI); `mail/` SMTP or console; `services/spreadsheet.py` shared .xlsx; `services/user_import/`.
 - CLI `python -m app.cli`: set-password / revoke-sessions / list-sessions `<user> [--org] [--id]`, check-db, check-data, storage tools, `optimize-uploads`, org commands (list/create/rename/change-code/disable/enable), jobs (`run-jobs`, `retry-failed-jobs`, `cleanup`).
 - Scripts: `scripts/seed_driver_routine.py`, `scripts/load_live_tracking.py` (throwaway school only).
+- **FastAPI 0.165.0 + Starlette 1.10.0** pinned in requirements.txt (21 Nov 2026; Python ≥ 3.11). Rebuild the image to deploy.
 - Docs: `docs/ORGANISATIONS.md`, `AUTH.md`, `OPERATIONS.md` (migrations, jobs, retention, upload size), `FRONTEND_README.md`, `DPDP.md`, `SIBLINGS_PROGRESS.md`; deploy `DEPLOY.md`, `DEPLOY_ORACLE.md`.
 
 ### 6.2 Migrations (head = `0029_driver_profiles`)
@@ -320,9 +321,9 @@ Do one item per session if the allowance is tight; **save progress (tick + notes
       (+`/siblings`), `/platform/bulk-import/template[?school=]`, `services/login_share.py` (`GET /students/login-status`,
       `POST /students/{id}/login-share`). 329 tests, 327 pass (2 known stale). 1,050 students upload < 1 s.
     - [x] **Web: class fee moved to Fees** DONE 21 Nov 2026 (Fees → 🏷️ Class fees; Classes no longer asks for it). App unchanged.
-    - [ ] **HQ page** (dashboard): school → Bulk upload: template download, folder picker (send only .xlsx + `paths`;
-      Next Server Actions need a bigger `bodySizeLimit` or a route handler), check report grouped by file, Upload,
-      logins download (Excel), sibling cards. Generated admin password on "New school" too.
+    - [x] **HQ page** DONE 21 Nov 2026: school → Bulk upload (`/schools/[code]/bulk-upload`): templates, folder picker,
+      check report by file, Upload, staff logins (CSV, shown once), brother/sister cards. Upload via a Route Handler
+      (`send/route.ts`, same-origin check), siblings via Server Action. Playwright-checked against a real local API.
     - [ ] **Share-login screens**: web SectionPage + app (class teacher): list from `/students/login-status`, "New password &
       share" → copy / WhatsApp `share_text`, warning when `was_signed_in`.
 
